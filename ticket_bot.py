@@ -19,7 +19,7 @@ logger.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s')
 
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(formatter)
 
 file_handler = logging.FileHandler('bot.log', encoding='utf-8')
@@ -53,6 +53,10 @@ except Exception as e:
 active_jobs = {}  # {chat_id: {'thread': thread, 'stop_flag': False}}
 user_steps = {}   # {chat_id: 'step_name'} - текущий шаг пользователя
 user_data = {}    # {chat_id: {'from': ..., 'to': ..., 'date': ..., 'passengers': ...}}
+heartbeat_enabled = set()  # Множество chat_id, у которых включен heartbeat
+
+# Хранилище интервалов heartbeat: {chat_id: interval_seconds}
+heartbeat_intervals = {}
 
 # --- ФУНКЦИИ ПАРСИНГА ---
 
@@ -167,9 +171,18 @@ def parse_carriage_info(status_cell):
 def tracking_worker(chat_id, from_station, to_station, date, selected_time):
     logger.info(f"🔄 Запуск трекинга: {chat_id} | {selected_time}")
     num_passengers = user_data[chat_id].get('passengers', 1)
+    last_heartbeat = time.time()
+    # Получаем интервал heartbeat для этого пользователя (по умолчанию 1800 сек = 30 мин)
+    hb_interval = heartbeat_intervals.get(chat_id, 1800)
 
     while chat_id in active_jobs:
         try:
+            # Отправка heartbeat сообщения если включено и прошел заданный интервал
+            if chat_id in heartbeat_enabled and (time.time() - last_heartbeat) >= hb_interval:
+                logger.debug(f"💓 Heartbeat для {chat_id} (интервал: {hb_interval} сек)")
+                bot.send_message(chat_id, "💓 Бот работает, проверяю билеты...")
+                last_heartbeat = time.time()
+
             trains = get_trains_list(from_station, to_station, date)
             current_train = next((t for t in trains if t['time'] == selected_time), None)
 
@@ -190,6 +203,8 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 send_detailed_train_info(chat_id, current_train, num_passengers)
                 
                 active_jobs.pop(chat_id, None)
+                heartbeat_enabled.discard(chat_id)  # Убираем из heartbeat при успехе
+                heartbeat_intervals.pop(chat_id, None)  # Очищаем интервал при успехе
                 logger.info(f"✅ Трекинг завершен успешно для {chat_id}")
                 return
 
@@ -393,16 +408,90 @@ def on_confirm(call):
         bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
         return
 
-    bot.answer_callback_query(call.id, f"✅ Мониторинг запущен! Ждите уведомления.")
-    
-    thread = threading.Thread(
-        target=tracking_worker,
-        args=(chat_id, info['from'], info['to'], info['date'], sel_time),
-        daemon=True
+    # Предлагаем выбрать интервал heartbeat
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("10 мин", callback_data=f"hb_interval_600_{sel_time}_{sel_num}"),
+        InlineKeyboardButton("20 мин", callback_data=f"hb_interval_1200_{sel_time}_{sel_num}")
     )
-    thread.start()
-    active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
-    logger.info(f"Мониторинг активирован: {chat_id} -> {sel_time}")
+    kb.add(
+        InlineKeyboardButton("30 мин", callback_data=f"hb_interval_1800_{sel_time}_{sel_num}"),
+        InlineKeyboardButton("1 час", callback_data=f"hb_interval_3600_{sel_time}_{sel_num}")
+    )
+    kb.add(InlineKeyboardButton("❌ Без heartbeat", callback_data=f"heartbeat_no_{sel_time}_{sel_num}"))
+    
+    bot.send_message(chat_id, "💓 Выберите интервал сообщений 'Бот работает':", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("hb_interval_") or call.data.startswith("heartbeat_no_"))
+def on_heartbeat_choice(call):
+    chat_id = call.message.chat.id
+    data = call.data.split("_", 4)  # hb_interval/heartbeat_no + interval_or_empty + sel_time + sel_num
+    
+    if len(data) < 4:
+        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
+        return
+    
+    choice_type = data[0]  # hb_interval или heartbeat_no
+    
+    if choice_type == "hb_interval":
+        # Формат: hb_interval_600_seltime_selnun
+        interval_seconds = int(data[1])
+        sel_time, sel_num = data[2], data[3]
+        
+        info = user_data.get(chat_id)
+        if not info:
+            bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
+            return
+        
+        # Сохраняем интервал и включаем heartbeat
+        heartbeat_intervals[chat_id] = interval_seconds
+        heartbeat_enabled.add(chat_id)
+        
+        minutes = interval_seconds // 60
+        if minutes >= 60:
+            hours = minutes // 60
+            msg_text = f"✅ Heartbeat включен! Сообщения каждые {hours} ч."
+        else:
+            msg_text = f"✅ Heartbeat включен! Сообщения каждые {minutes} мин."
+        
+        bot.answer_callback_query(call.id, msg_text, show_alert=False)
+        bot.send_message(chat_id, f"💓 {msg_text} Мониторинг запущен.")
+        
+    else:  # heartbeat_no
+        sel_time, sel_num = data[1], data[2]
+        
+        info = user_data.get(chat_id)
+        if not info:
+            bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
+            return
+        
+        # Отключаем heartbeat
+        heartbeat_enabled.discard(chat_id)
+        heartbeat_intervals.pop(chat_id, None)
+        bot.answer_callback_query(call.id, "✅ Мониторинг запущен без heartbeat.", show_alert=False)
+    
+    # Запуск трекинга (для обоих случаев)
+    if choice_type == "hb_interval" or choice_type == "heartbeat_no":
+        if choice_type == "heartbeat_no":
+            sel_time, sel_num = data[1], data[2]
+        else:
+            sel_time, sel_num = data[2], data[3]
+        
+        info = user_data.get(chat_id)
+        if not info:
+            bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
+            return
+        
+        thread = threading.Thread(
+            target=tracking_worker,
+            args=(chat_id, info['from'], info['to'], info['date'], sel_time),
+            daemon=True
+        )
+        thread.start()
+        active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
+        
+        hb_status = "включен" if chat_id in heartbeat_enabled else "выключен"
+        logger.info(f"Мониторинг активирован: {chat_id} -> {sel_time} | heartbeat={hb_status}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_list")
 def on_back(call):
