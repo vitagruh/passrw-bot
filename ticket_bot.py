@@ -138,7 +138,56 @@ heartbeat_intervals = {}
 # Хранилище статусов отслеживания: {chat_id: {'train_num': ..., 'train_time': ..., 'seats_available': ..., 'requests_count': ...}}
 tracking_status = {}
 
+# Rate limiting: {chat_id: {'last_request': timestamp, 'request_count': int}}
+rate_limit_store = {}
+RATE_LIMIT_WINDOW = 60  # Окно в секундах
+RATE_LIMIT_MAX_REQUESTS = 30  # Максимум запросов в окно
+
+# Запрещенные символы для XSS защиты
+FORBIDDEN_CHARS_PATTERN = re.compile(r'[<>\"\'&]')
+
 # --- ФУНКЦИИ ПАРСИНГА ---
+
+def sanitize_input(text: str) -> str:
+    """
+    Очистка пользовательского ввода от потенциально опасных символов.
+    Защита от XSS и инъекций.
+    """
+    if not text:
+        return ""
+    # Удаляем опасные символы
+    text = FORBIDDEN_CHARS_PATTERN.sub('', text)
+    # Ограничиваем длину
+    return text[:100]
+
+
+def check_rate_limit(chat_id: int) -> bool:
+    """
+    Проверка rate limiting для пользователя.
+    Возвращает True если запрос разрешен, False если превышен лимит.
+    """
+    current_time = time.time()
+    
+    if chat_id not in rate_limit_store:
+        rate_limit_store[chat_id] = {'last_request': current_time, 'request_count': 1}
+        return True
+    
+    store = rate_limit_store[chat_id]
+    
+    # Если окно времени истекло, сбрасываем счетчик
+    if current_time - store['last_request'] > RATE_LIMIT_WINDOW:
+        rate_limit_store[chat_id] = {'last_request': current_time, 'request_count': 1}
+        return True
+    
+    # Если в пределах окна
+    if store['request_count'] >= RATE_LIMIT_MAX_REQUESTS:
+        logger.warning(f"⚠️ Rate limit превышен для пользователя {chat_id}")
+        return False
+    
+    # Увеличиваем счетчик
+    rate_limit_store[chat_id]['request_count'] += 1
+    return True
+
 
 def get_headers():
     """Получение заголовков с случайным User-Agent"""
@@ -160,20 +209,33 @@ def get_headers():
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
 
-def get_trains_list(from_station, to_station, date):
+def get_trains_list(from_station, to_station, date, chat_id=None):
+    """
+    Получение списка поездов с логированием запроса.
+    
+    Args:
+        from_station: станция отправления
+        to_station: станция назначения
+        date: дата поездки
+        chat_id: ID чата пользователя (для логирования)
+    """
     headers = get_headers()
 
     params = {"from": from_station, "to": to_station, "date": date}
     url = f"https://pass.rw.by/ru/route/?" + urlencode(params)
 
+    # Логирование запроса с информацией о пользователе
+    user_info = f"User(chat_id={chat_id})" if chat_id else "System"
+    logger.info(f"🔍 Запрос поиска билетов: {user_info} | Маршрут: {from_station} → {to_station} | Дата: {date}")
+
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
     except requests.Timeout:
-        logger.error(f"⏱ Таймаут запроса к {url}")
+        logger.error(f"⏱ Таймаут запроса к {url} | {user_info}")
         return []
     except requests.RequestException as e:
-        logger.error(f"🌐 Ошибка запроса к {url}: {e}")
+        logger.error(f"🌐 Ошибка запроса к {url}: {e} | {user_info}")
         return []
 
     soup = BeautifulSoup(response.text, 'html.parser')
@@ -201,10 +263,10 @@ def get_trains_list(from_station, to_station, date):
                 'parsed_info': parsed_info
             })
         except Exception as e:
-            logger.warning(f"⚠️ Пропущена строка поезда: {e}")
+            logger.warning(f"⚠️ Пропущена строка поезда: {e} | {user_info}")
             continue
 
-    logger.debug(f"✅ Найдено {len(trains)} поездов")
+    logger.info(f"✅ Найдено {len(trains)} поездов для {user_info} | Поезда: {[t['num'] for t in trains]}")
     return trains
 
 def parse_carriage_info(status_cell):
@@ -249,7 +311,7 @@ def parse_carriage_info(status_cell):
 # --- ФУНКЦИИ ОТСЛЕЖИВАНИЯ ---
 
 def tracking_worker(chat_id, from_station, to_station, date, selected_time):
-    logger.info(f"🔄 Запуск трекинга: {chat_id} | {selected_time}")
+    logger.info(f"🔄 Запуск трекинга: {chat_id} | Поезд: {selected_time} | Маршрут: {from_station} → {to_station}")
     num_passengers = user_data[chat_id].get('passengers', 1)
     last_heartbeat = time.time()
     # Получаем интервал heartbeat для этого пользователя (по умолчанию 1800 сек = 30 мин)
@@ -271,15 +333,15 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
             
             # Отправка heartbeat сообщения если включено и прошел заданный интервал
             if chat_id in heartbeat_enabled and (time.time() - last_heartbeat) >= hb_interval:
-                logger.debug(f"💓 Heartbeat для {chat_id} (интервал: {hb_interval} сек)")
+                logger.info(f"💓 Heartbeat для {chat_id} (интервал: {hb_interval} сек) | Поезд: {selected_time}")
                 bot.send_message(chat_id, "💓 Бот работает, проверяю билеты...")
                 last_heartbeat = time.time()
 
-            trains = get_trains_list(from_station, to_station, date)
+            trains = get_trains_list(from_station, to_station, date, chat_id)
             current_train = next((t for t in trains if t['time'] == selected_time), None)
 
             if not current_train:
-                logger.warning(f"Поезд {selected_time} не найден в списке.")
+                logger.warning(f"Поезд {selected_time} не найден в списке для пользователя {chat_id}.")
                 time.sleep(CHECK_INTERVAL)
                 continue
             
@@ -310,14 +372,14 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 heartbeat_enabled.discard(chat_id)  # Убираем из heartbeat при успехе
                 heartbeat_intervals.pop(chat_id, None)  # Очищаем интервал при успехе
                 tracking_status.pop(chat_id, None)  # Очищаем статус при успехе
-                logger.info(f"✅ Трекинг завершен успешно для {chat_id}")
+                logger.info(f"✅ Трекинг завершен успешно для {chat_id} | Поезд №{current_train['num']} ({selected_time})")
                 return
 
-            logger.debug(f"[{datetime.now().strftime('%H:%M')}] Нет мест для {chat_id}. Ждем...")
+            logger.debug(f"[{datetime.now().strftime('%H:%M')}] Нет мест для {chat_id} | Поезд: {selected_time}. Ждем...")
             time.sleep(CHECK_INTERVAL)
             
         except Exception as e:
-            logger.error(f"Ошибка в потоке трекинга {chat_id}: {e}")
+            logger.error(f"Ошибка в потоке трекинга {chat_id}: {e}", exc_info=True)
             time.sleep(CHECK_INTERVAL)
 
 
@@ -407,7 +469,18 @@ def show_tracking_status(message):
 def handle_step_input(message):
     chat_id = message.chat.id
     current_step = user_steps[chat_id]
-    text = message.text.strip()
+    
+    # Проверка rate limiting
+    if not check_rate_limit(chat_id):
+        bot.send_message(chat_id, "⚠️ Слишком много запросов. Пожалуйста, подождите немного.")
+        logger.warning(f"⚠️ Rate limit для пользователя {chat_id} на шаге {current_step}")
+        return
+    
+    # Очистка ввода от опасных символов
+    text = sanitize_input(message.text.strip())
+    
+    # Логирование ввода пользователя
+    logger.info(f"📝 Пользователь {chat_id} вводит на шаге {current_step}: '{text}'")
 
     if current_step == 'ask_from':
         user_data[chat_id]['from'] = text
@@ -451,7 +524,9 @@ def handle_step_input(message):
 
         loading_msg = bot.send_message(chat_id, f"🔍 Ищу поезда по маршруту {user_data[chat_id]['from']} → {user_data[chat_id]['to']} на {user_data[chat_id]['date']}...")
         
-        trains = get_trains_list(user_data[chat_id]['from'], user_data[chat_id]['to'], user_data[chat_id]['date'])
+        # Логирование поиска с номером пользователя и параметрами
+        logger.info(f"🎫 Поиск билетов для пользователя {chat_id}: {user_data[chat_id]['from']} → {user_data[chat_id]['to']} | Дата: {user_data[chat_id]['date']} | Пассажиров: {num_pax}")
+        trains = get_trains_list(user_data[chat_id]['from'], user_data[chat_id]['to'], user_data[chat_id]['date'], chat_id)
         
         bot.delete_message(chat_id, loading_msg.message_id)
 
@@ -507,7 +582,7 @@ def on_preview(call):
         bot.answer_callback_query(call.id, "Сессия истекла. Начните /track", show_alert=True)
         return
 
-    trains = get_trains_list(info['from'], info['to'], info['date'])
+    trains = get_trains_list(info['from'], info['to'], info['date'], chat_id)
     train = next((t for t in trains if t['time'] == sel_time and t['num'] == sel_num), None)
 
     if not train:
@@ -669,7 +744,7 @@ def on_back(call):
         return
 
     bot.answer_callback_query(call.id, "Обновляю список...")
-    trains = get_trains_list(info['from'], info['to'], info['date'])
+    trains = get_trains_list(info['from'], info['to'], info['date'], chat_id)
     
     if not trains:
         bot.send_message(chat_id, "Список пуст.")
