@@ -10,24 +10,100 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 import os
 import logging
+from logging.handlers import RotatingFileHandler
+import traceback
 from fake_useragent import UserAgent
 
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
-logger = logging.getLogger('TicketBot')
-logger.setLevel(logging.DEBUG)
 
-formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(message)s')
+# ============================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ (BEST PRACTICES)
+# ============================================
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
-console_handler.setFormatter(formatter)
+def setup_logger(name: str = 'TicketBot') -> logging.Logger:
+    """
+    Создает и настраивает логгер с консольным и файловым выводом.
+    
+    Best practices:
+    - RotatingFileHandler для автоматической ротации логов
+    - Структурированный формат с информацией о месте вызова
+    - Разделение уровней ERROR/CRITICAL в отдельный файл
+    - Поддержка уровня логирования через переменную окружения
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.NOTSET)  # Устанавливаем минимальный уровень, фильтрация будет на хендлерах
+    
+    # Получаем уровень логирования из переменной окружения (по умолчанию INFO)
+    log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+    numeric_level = getattr(logging, log_level, logging.INFO)
+    
+    # Формат с детальной информацией (время, уровень, модуль, функция, строка, сообщение)
+    detailed_formatter = logging.Formatter(
+        fmt='%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Упрощенный формат для консоли (короче и читаемее)
+    console_formatter = logging.Formatter(
+        fmt='%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Консольный обработчик (выводит всё от DEBUG и выше)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(numeric_level)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # Файловый обработчик с ротацией
+    # maxBytes=10MB, backupCount=5 файлов (итого до 50MB логов)
+    log_file = os.getenv('LOG_FILE', 'logs/bot.log')
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    
+    file_handler = RotatingFileHandler(
+        filename=log_file,
+        encoding='utf-8',
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+        delay=True  # Создавать файл только при первой записи
+    )
+    file_handler.setLevel(logging.DEBUG)  # В файл пишем всё от DEBUG
+    file_handler.setFormatter(detailed_formatter)
+    logger.addHandler(file_handler)
+    
+    # Отдельный файл для ошибок (ERROR и CRITICAL)
+    error_log_file = os.getenv('ERROR_LOG_FILE', 'logs/error.log')
+    error_log_dir = os.path.dirname(error_log_file)
+    if error_log_dir and not os.path.exists(error_log_dir):
+        os.makedirs(error_log_dir, exist_ok=True)
+    
+    error_handler = RotatingFileHandler(
+        filename=error_log_file,
+        encoding='utf-8',
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+        delay=True
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(detailed_formatter)
+    logger.addHandler(error_handler)
+    
+    # Запрещаем распространение логов вверх по иерархии
+    logger.propagate = False
+    
+    return logger
 
-file_handler = logging.FileHandler('bot.log', encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(formatter)
 
-logger.addHandler(console_handler)
-logger.addHandler(file_handler)
+# Создаем основной логгер
+logger = setup_logger('TicketBot')
+
+
+def log_exception(logger_instance: logging.Logger, message: str = "Произошла ошибка"):
+    """
+    Вспомогательная функция для логирования исключений с полным traceback.
+    """
+    logger_instance.error(f"{message}: {traceback.format_exc()}")
 
 # --- ЗАГРУЗКА .ENV ---
 load_dotenv()
