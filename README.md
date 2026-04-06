@@ -1,10 +1,225 @@
-- 👋 Hi, I’m @vitagruh
-- 👀 I’m interested in ...
-- 🌱 I’m currently learning ...
-- 💞️ I’m looking to collaborate on ...
-- 📫 How to reach me ...
+# Telegram Bot для отслеживания билетов на поезда (Беларусь)
 
-<!---
-vitagruh/vitagruh is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
-You can click the Preview link to take a look at your changes.
---->
+🚂 Бот для мониторинга наличия мест в поездах на сайте pass.rw.by и автоматического уведомления при появлении билетов.
+
+## Возможности
+
+- ✅ Отслеживание наличия мест для указанного количества пассажиров
+- 🔔 Мгновенные уведомления при появлении билетов
+- 💾 Сохранение активных задач при перезапуске бота
+- 🔄 Автоматическое восстановление после сетевых сбоев
+- 📊 Подробная информация о поездах и вагонах
+- ⏱ Настраиваемый интервал проверки
+
+## Требования
+
+- Python 3.7+
+- Telegram Bot Token
+
+## Установка
+
+### 1. Клонируйте репозиторий или создайте файл бота
+
+```bash
+cd /workspace
+```
+
+### 2. Создайте виртуальное окружение (рекомендуется)
+
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# или
+venv\Scripts\activate  # Windows
+```
+
+### 3. Установите зависимости
+
+Создайте файл `requirements.txt`:
+
+```txt
+pyTelegramBotAPI>=4.10.0
+beautifulsoup4>=4.11.0
+requests>=2.28.0
+python-dotenv>=1.0.0
+fake-useragent>=1.1.0
+```
+
+Установите пакеты:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Настройте переменные окружения
+
+Создайте файл `.env` в той же директории:
+
+```env
+TELEGRAM_TOKEN=***REMOVED***
+CHECK_INTERVAL=60
+JOBS_FILE=active_jobs.json
+```
+
+**Получение токена:**
+1. Откройте @BotFather в Telegram
+2. Отправьте команду `/newbot`
+3. Следуйте инструкциям для создания бота
+4. Скопируйте полученный токен в `.env`
+
+## Использование
+
+### Запуск бота
+
+```bash
+python ticket_bot.py
+```
+
+### Команды бота
+
+| Команда | Описание |
+|---------|----------|
+| `/start` | Приветственное сообщение и инструкция |
+| `/track <откуда> <куда> <дата> <пассажиры>` | Начать отслеживание билетов |
+| `/status` | Проверить статус активного отслеживания |
+| `/stop` | Остановить отслеживание |
+
+### Примеры
+
+```
+/start
+/track Минск Москва 2026-04-10 2
+/status
+/stop
+```
+
+## Структура проекта
+
+```
+/workspace/
+├── ticket_bot.py       # Основной файл бота
+├── requirements.txt    # Зависимости Python
+├── .env               # Переменные окружения (не коммитить!)
+├── bot.log            # Логи работы бота
+├── active_jobs.json   # Сохранённые активные задачи
+└── README.md          # Этот файл
+```
+
+## Особенности
+
+### Персистентность
+- Активные задачи сохраняются в `active_jobs.json`
+- При перезапуске бота все задачи автоматически восстанавливаются
+- Задачи удаляются из файла после успешного нахождения мест или остановки
+
+### Обработка ошибок
+- Таймауты при запросах к сайту
+- Повторные попытки при временных сбоях
+- Уведомление пользователя при длительных проблемах
+- Логирование всех событий в `bot.log`
+
+### Парсинг данных
+- Извлечение количества мест с обработкой различных форматов
+- Получение цен в BYN
+- Определение типа вагона
+
+## Настройка
+
+### Изменение интервала проверки
+
+В файле `.env`:
+
+```env
+CHECK_INTERVAL=30  # Проверка каждые 30 секунд
+```
+
+⚠️ **Внимание:** Слишком частые запросы могут привести к блокировке со стороны сайта.
+
+### Логирование
+
+Логи записываются в два места:
+- `bot.log` - полный лог с уровнем DEBUG
+- Консоль - логи с уровнем INFO
+
+## Развёртывание на сервере
+
+### Использование systemd (Linux)
+
+Создайте файл `/etc/systemd/system/ticketbot.service`:
+
+```ini
+[Unit]
+Description=Telegram Ticket Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your_user
+WorkingDirectory=/path/to/workspace
+Environment="PATH=/path/to/venv/bin"
+ExecStart=/path/to/venv/bin/python ticket_bot.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Запустите сервис:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable ticketbot
+sudo systemctl start ticketbot
+sudo systemctl status ticketbot
+```
+
+### Docker (опционально)
+
+Создайте `Dockerfile`:
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ticket_bot.py .
+COPY .env .
+
+CMD ["python", "ticket_bot.py"]
+```
+
+## Безопасность
+
+- ⚠️ Никогда не коммитьте файл `.env` в репозиторий
+- Добавьте `.env` в `.gitignore`
+- Используйте секреты для хранения токена в production
+
+## Устранение неполадок
+
+### Бот не отвечает
+1. Проверьте логи: `cat bot.log`
+2. Убедитесь, что токен правильный
+3. Проверьте подключение к интернету
+
+### Не находит поезда
+1. Проверьте правильность названий станций
+2. Убедитесь, что дата в формате YYYY-MM-DD
+3. Проверьте доступность сайта pass.rw.by
+
+### Ошибки парсинга
+- Сайт может изменить структуру HTML
+- Проверьте логи для деталей ошибки
+- При необходимости обновите селекторы в коде
+
+## Лицензия
+
+MIT License
+
+## Поддержка
+
+При возникновении проблем:
+1. Проверьте логи в `bot.log`
+2. Убедитесь, что все зависимости установлены
+3. Проверьте корректность токена в `.env`
