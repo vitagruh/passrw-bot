@@ -1,21 +1,20 @@
 ```
-# Compiled Python files
-*.pyc
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Environment files
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
 .env
 .env.local
 *.env.*
 
-# Logs
-*.log
-
-# Temporary files
-*.tmp
-*.swp
-
-# Editor/IDE files
+# Editors
 .vscode/
 .idea/
 
@@ -29,12 +28,12 @@ dist/
 build/
 target/
 
-# Test coverage
+# Coverage
 .coverage
 coverage/
 htmlcov/
 
-# Cache directories
-.mypy_cache/
+# Testing
 .pytest_cache/
+.mypy_cache/
 ```
