@@ -1,3 +1,28 @@
-# Examples 1:
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Example 2 (Project with artifacts):
+# Environment
+.venv/
+venv/
+.env
+.env.local
+*.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+target/
+```
