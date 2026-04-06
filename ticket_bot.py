@@ -566,24 +566,34 @@ def on_heartbeat_choice(call):
     chat_id = call.message.chat.id
     
     # Правильный парсинг callback_data
+    # Формат кнопок: hb_interval_<seconds>_<sel_time>_<sel_num>
+    # При split('_') получаем: ['hb', 'interval', '<seconds>', '<sel_time>', '<sel_num>']
     if call.data.startswith("hb_interval_"):
-        # Формат: hb_interval_600_seltime_selnun
-        parts = call.data.split("_", 3)
-        if len(parts) < 4:
-            bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
+        parts = call.data.split("_")
+        if len(parts) < 5:
+            bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
             return
         choice_type = "hb_interval"
-        interval_seconds = int(parts[1])
-        sel_time, sel_num = parts[2], parts[3]
+        try:
+            interval_seconds = int(parts[2])
+        except ValueError:
+            logger.error(f"Неверный формат интервала в callback: {call.data}")
+            bot.answer_callback_query(call.id, "Ошибка интервала", show_alert=True)
+            return
+        sel_time = parts[3]
+        sel_num = parts[4]
+        
     elif call.data.startswith("heartbeat_no_"):
-        # Формат: heartbeat_no_seltime_selnun
-        parts = call.data.split("_", 3)
-        if len(parts) < 3:
-            bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
+        # Формат: heartbeat_no_<sel_time>_<sel_num>
+        # При split('_'): ['heartbeat', 'no', '<sel_time>', '<sel_num>']
+        parts = call.data.split("_")
+        if len(parts) < 4:
+            bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
             return
         choice_type = "heartbeat_no"
         interval_seconds = None
-        sel_time, sel_num = parts[1], parts[2]
+        sel_time = parts[2]
+        sel_num = parts[3]
     else:
         bot.answer_callback_query(call.id, "Неизвестная команда", show_alert=True)
         return
