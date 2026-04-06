@@ -30,11 +30,12 @@ def setup_logger(name: str = 'TicketBot') -> logging.Logger:
     - Поддержка уровня логирования через переменную окружения
     """
     logger = logging.getLogger(name)
-    logger.setLevel(logging.NOTSET)  # Устанавливаем минимальный уровень, фильтрация будет на хендлерах
     
     # Получаем уровень логирования из переменной окружения (по умолчанию INFO)
     log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
     numeric_level = getattr(logging, log_level, logging.INFO)
+    
+    logger.setLevel(numeric_level)  # Устанавливаем уровень логирования из переменной окружения
     
     # Формат с детальной информацией (время, уровень, модуль, функция, строка, сообщение)
     detailed_formatter = logging.Formatter(
@@ -66,9 +67,9 @@ def setup_logger(name: str = 'TicketBot') -> logging.Logger:
         encoding='utf-8',
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
-        delay=True  # Создавать файл только при первой записи
+        delay=False  # Создавать файл сразу при инициализации
     )
-    file_handler.setLevel(logging.DEBUG)  # В файл пишем всё от DEBUG
+    file_handler.setLevel(numeric_level)  # В файл пишем от уровня LOG_LEVEL
     file_handler.setFormatter(detailed_formatter)
     logger.addHandler(file_handler)
     
@@ -83,7 +84,7 @@ def setup_logger(name: str = 'TicketBot') -> logging.Logger:
         encoding='utf-8',
         maxBytes=5 * 1024 * 1024,  # 5 MB
         backupCount=3,
-        delay=True
+        delay=False  # Создавать файл сразу при инициализации
     )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(detailed_formatter)
@@ -501,18 +502,31 @@ def on_confirm(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("hb_interval_") or call.data.startswith("heartbeat_no_"))
 def on_heartbeat_choice(call):
     chat_id = call.message.chat.id
-    data = call.data.split("_", 4)  # hb_interval/heartbeat_no + interval_or_empty + sel_time + sel_num
     
-    if len(data) < 4:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
+    # Правильный парсинг callback_data
+    if call.data.startswith("hb_interval_"):
+        # Формат: hb_interval_600_seltime_selnun
+        parts = call.data.split("_", 3)
+        if len(parts) < 4:
+            bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
+            return
+        choice_type = "hb_interval"
+        interval_seconds = int(parts[1])
+        sel_time, sel_num = parts[2], parts[3]
+    elif call.data.startswith("heartbeat_no_"):
+        # Формат: heartbeat_no_seltime_selnun
+        parts = call.data.split("_", 3)
+        if len(parts) < 3:
+            bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
+            return
+        choice_type = "heartbeat_no"
+        interval_seconds = None
+        sel_time, sel_num = parts[1], parts[2]
+    else:
+        bot.answer_callback_query(call.id, "Неизвестная команда", show_alert=True)
         return
     
-    choice_type = data[0]  # hb_interval или heartbeat_no
-    
     if choice_type == "hb_interval":
-        # Формат: hb_interval_600_seltime_selnun
-        interval_seconds = int(data[1])
-        sel_time, sel_num = data[2], data[3]
         
         info = user_data.get(chat_id)
         if not info:
@@ -534,8 +548,6 @@ def on_heartbeat_choice(call):
         bot.send_message(chat_id, f"💓 {msg_text} Мониторинг запущен.")
         
     else:  # heartbeat_no
-        sel_time, sel_num = data[1], data[2]
-        
         info = user_data.get(chat_id)
         if not info:
             bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
@@ -548,11 +560,6 @@ def on_heartbeat_choice(call):
     
     # Запуск трекинга (для обоих случаев)
     if choice_type == "hb_interval" or choice_type == "heartbeat_no":
-        if choice_type == "heartbeat_no":
-            sel_time, sel_num = data[1], data[2]
-        else:
-            sel_time, sel_num = data[2], data[3]
-        
         info = user_data.get(chat_id)
         if not info:
             bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
