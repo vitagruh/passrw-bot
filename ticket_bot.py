@@ -231,6 +231,8 @@ def get_trains_list(from_station, to_station, date, chat_id=None):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+        # Логирование успешного HTTP запроса
+        logger.debug(f"✅ HTTP запрос успешен (status={response.status_code}) для {user_info}")
     except requests.Timeout:
         logger.error(f"⏱ Таймаут запроса к {url} | {user_info}")
         return []
@@ -266,7 +268,9 @@ def get_trains_list(from_station, to_station, date, chat_id=None):
             logger.warning(f"⚠️ Пропущена строка поезда: {e} | {user_info}")
             continue
 
-    logger.info(f"✅ Найдено {len(trains)} поездов для {user_info} | Поезда: {[t['num'] for t in trains]}")
+    # Логирование с номерами поездов и пользователем
+    train_numbers = [t['num'] for t in trains]
+    logger.info(f"✅ Найдено {len(trains)} поездов для {user_info} | Поезда №№: {', '.join(train_numbers) if train_numbers else 'нет данных'}")
     return trains
 
 def parse_carriage_info(status_cell):
@@ -589,6 +593,9 @@ def on_preview(call):
         bot.answer_callback_query(call.id, "Поезд не найден (обновите список)", show_alert=True)
         return
 
+    # Логирование просмотра деталей поезда пользователем
+    logger.info(f"👁 Пользователь {chat_id} просматривает детали поезда №{sel_num} ({sel_time}) | Маршрут: {info['from']} → {info['to']}")
+    
     send_detailed_train_info(chat_id, train, info['passengers'])
 
     kb = InlineKeyboardMarkup()
@@ -622,6 +629,9 @@ def on_confirm(call):
         bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
         return
 
+    # Логирование запуска мониторинга пользователем
+    logger.info(f"▶️ Пользователь {chat_id} запустил мониторинг поезда №{sel_num} ({sel_time}) | Маршрут: {info['from']} → {info['to']}")
+
     # Предлагаем выбрать интервал heartbeat
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -646,13 +656,14 @@ def on_heartbeat_choice(call):
     if call.data.startswith("hb_interval_"):
         parts = call.data.split("_")
         if len(parts) < 5:
+            logger.error(f"Ошибка формата callback данных у пользователя {chat_id}: {call.data}")
             bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
             return
         choice_type = "hb_interval"
         try:
             interval_seconds = int(parts[2])
         except ValueError:
-            logger.error(f"Неверный формат интервала в callback: {call.data}")
+            logger.error(f"Неверный формат интервала в callback у пользователя {chat_id}: {call.data}")
             bot.answer_callback_query(call.id, "Ошибка интервала", show_alert=True)
             return
         sel_time = parts[3]
@@ -663,6 +674,7 @@ def on_heartbeat_choice(call):
         # При split('_'): ['heartbeat', 'no', '<sel_time>', '<sel_num>']
         parts = call.data.split("_")
         if len(parts) < 4:
+            logger.error(f"Ошибка формата callback данных у пользователя {chat_id}: {call.data}")
             bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
             return
         choice_type = "heartbeat_no"
@@ -670,6 +682,7 @@ def on_heartbeat_choice(call):
         sel_time = parts[2]
         sel_num = parts[3]
     else:
+        logger.warning(f"Неизвестная команда callback от пользователя {chat_id}: {call.data}")
         bot.answer_callback_query(call.id, "Неизвестная команда", show_alert=True)
         return
     
@@ -721,7 +734,7 @@ def on_heartbeat_choice(call):
         active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
         
         hb_status = "включен" if chat_id in heartbeat_enabled else "выключен"
-        logger.info(f"Мониторинг активирован: {chat_id} -> {sel_time} | heartbeat={hb_status}")
+        logger.info(f"✅ Мониторинг активирован: Пользователь {chat_id} -> Поезд №{sel_num} ({sel_time}) | heartbeat={hb_status}")
         
         # Отправляем сообщение об успешном создании задачи отслеживания
         bot.send_message(
@@ -740,9 +753,11 @@ def on_back(call):
     chat_id = call.message.chat.id
     info = user_data.get(chat_id)
     if not info:
+        logger.warning(f"Пользователь {chat_id} попытался вернуться к списку, но сессия утеряна")
         bot.send_message(chat_id, "Сессия утеряна. Используйте /track")
         return
 
+    logger.info(f"🔙 Пользователь {chat_id} вернулся к списку поездов | Маршрут: {info['from']} → {info['to']}")
     bot.answer_callback_query(call.id, "Обновляю список...")
     trains = get_trains_list(info['from'], info['to'], info['date'], chat_id)
     
@@ -758,19 +773,23 @@ def on_view_status(call):
     chat_id = call.message.chat.id
     
     if chat_id not in tracking_status:
+        logger.warning(f"Пользователь {chat_id} попытался просмотреть статус, но отслеживание не активно")
         bot.answer_callback_query(call.id, "ℹ️ У вас нет активного отслеживания", show_alert=True)
         return
     
     status = tracking_status[chat_id]
     info = user_data.get(chat_id, {})
     
-    msg = f"📊 <b>Статус отслеживания</b>\\n\\n"
-    msg += f"🚂 Поезд №: {status['train_num'] or 'Ожидание...'}\\n"
-    msg += f"⏰ Время: {status['train_time']}\\n"
-    msg += f"🪑 Доступно мест: {status['seats_available']}\\n"
-    msg += f"🔄 Запросов выполнено: {status['requests_count']}\\n"
-    msg += f"👥 Нужно мест: {info.get('passengers', 'N/A')}\\n"
-    msg += f"📍 Маршрут: {info.get('from', 'N/A')} → {info.get('to', 'N/A')}\\n"
+    # Логирование просмотра статуса пользователем
+    logger.info(f"📊 Пользователь {chat_id} просмотрел статус | Поезд №{status['train_num'] or 'N/A'} ({status['train_time']}) | Мест доступно: {status['seats_available']}")
+    
+    msg = f"📊 <b>Статус отслеживания</b>\n\n"
+    msg += f"🚂 Поезд №: {status['train_num'] or 'Ожидание...'}\n"
+    msg += f"⏰ Время: {status['train_time']}\n"
+    msg += f"🪑 Доступно мест: {status['seats_available']}\n"
+    msg += f"🔄 Запросов выполнено: {status['requests_count']}\n"
+    msg += f"👥 Нужно мест: {info.get('passengers', 'N/A')}\n"
+    msg += f"📍 Маршрут: {info.get('from', 'N/A')} → {info.get('to', 'N/A')}\n"
     
     bot.answer_callback_query(call.id, "Статус обновлен", show_alert=False)
     bot.send_message(chat_id, msg, parse_mode="HTML")
@@ -778,9 +797,10 @@ def on_view_status(call):
 # --- ЗАПУСК ---
 if __name__ == '__main__':
     logger.info("🚀 Бот запущен в пошаговом режиме.")
+    logger.info("📋 Логирование: пользователь, номер поезда, маршрут и все запросы к сайту записываются в лог")
     try:
         bot.polling(none_stop=True)
     except KeyboardInterrupt:
-        logger.info("🛑 Остановка бота.")
+        logger.info("🛑 Остановка бота пользователем.")
     except Exception as e:
         logger.critical(f"💥 Критическая ошибка: {e}", exc_info=True)
