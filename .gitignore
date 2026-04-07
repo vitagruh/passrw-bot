@@ -4,28 +4,31 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-
-# Environment
-.env
-.env.local
-*.env.*
-
-# Editors
-.vscode/
-.idea/
-
-# Dependencies
-.venv/
+.Python
+env/
 venv/
-node_modules/
-
-# Build artifacts
-dist/
-build/
-target/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+.MF
+tags
+TAGS
+id
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
 ```
