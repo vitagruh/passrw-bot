@@ -971,32 +971,82 @@ def on_calendar_selection(call):
         return
     
     try:
-        # Получаем выбранную дату из календаря
-        selected_date = calendar.get_date(call.data)
-        if selected_date is None:
-            # Пользователь навигирует по календарю (месяц/год), а не выбирает дату
+        # Разбираем callback_data календаря: cal-name-YYYY-MM-DD или cal-name-IGNORE-YYYY-MM-DD
+        parts = call.data.split("-")
+        if len(parts) < 5:
             bot.answer_callback_query(call.id)
             return
         
-        date_str = selected_date.strftime("%Y-%m-%d")
+        # Формат: cal-{name}-{action}-{year}-{month}-{day} или cal-{name}-{ignore}-{year}-{month}-{day}
+        # action может быть: PREV-YEAR, PREV-MONTH, NEXT-YEAR, NEXT-MONTH, IGNORE, или день (01-31)
+        action = parts[2]
         
-        # Проверяем, что дата не в прошлом
-        from datetime import date
-        if selected_date < date.today():
-            bot.answer_callback_query(call.id, "❌ Нельзя выбрать прошедшую дату", show_alert=True)
+        # Если это навигация (не выбор дня), просто обновляем календарь
+        if action in ['PREV-YEAR', 'PREV-MONTH', 'NEXT-YEAR', 'NEXT-MONTH', 'IGNORE']:
+            # Для навигации используем calendar_query_handler
+            year = int(parts[3])
+            month = int(parts[4])
+            day = int(parts[5]) if len(parts) > 5 else 1
+            
+            result = calendar.calendar_query_handler(bot, call, parts[1], action, year, month, day)
+            if result:
+                # Дата выбрана
+                selected_date = result
+                date_str = selected_date.strftime("%Y-%m-%d")
+                
+                # Проверяем, что дата не в прошлом
+                from datetime import date
+                if selected_date < date.today():
+                    bot.answer_callback_query(call.id, "❌ Нельзя выбрать прошедшую дату", show_alert=True)
+                    return
+                
+                # Сохраняем дату и переходим к следующему шагу
+                user_data[chat_id]['date'] = date_str
+                user_steps[chat_id] = 'ask_passengers'
+                
+                bot.answer_callback_query(call.id, f"✅ Дата выбрана: {date_str}")
+                bot.send_message(
+                    chat_id,
+                    f"4️⃣ <b>Сколько пассажиров?</b>\nДата: <i>{date_str}</i>\nВведите число (1, 2, 3...):",
+                    parse_mode="HTML"
+                )
+            else:
+                # Календарь обновлен, ждем дальнейшего выбора
+                bot.answer_callback_query(call.id)
             return
         
-        # Сохраняем дату и переходим к следующему шагу
-        user_data[chat_id]['date'] = date_str
-        user_steps[chat_id] = 'ask_passengers'
+        # Если action - это день (01-31), то дата выбрана
+        if action.isdigit() and 1 <= int(action) <= 31:
+            year = int(parts[3])
+            month = int(parts[4])
+            day = int(action)
+            
+            from datetime import datetime
+            selected_date = datetime(year, month, day)
+            date_str = selected_date.strftime("%Y-%m-%d")
+            
+            # Проверяем, что дата не в прошлом
+            from datetime import date
+            if selected_date.date() < date.today():
+                bot.answer_callback_query(call.id, "❌ Нельзя выбрать прошедшую дату", show_alert=True)
+                return
+            
+            # Сохраняем дату и переходим к следующему шагу
+            user_data[chat_id]['date'] = date_str
+            user_steps[chat_id] = 'ask_passengers'
+            
+            bot.answer_callback_query(call.id, f"✅ Дата выбрана: {date_str}")
+            bot.send_message(
+                chat_id,
+                f"4️⃣ <b>Сколько пассажиров?</b>\nДата: <i>{date_str}</i>\nВведите число (1, 2, 3...):",
+                parse_mode="HTML"
+            )
+        else:
+            bot.answer_callback_query(call.id)
         
-        bot.answer_callback_query(call.id, f"✅ Дата выбрана: {date_str}")
-        bot.send_message(
-            chat_id,
-            f"4️⃣ <b>Сколько пассажиров?</b>\nДата: <i>{date_str}</i>\nВведите число (1, 2, 3...):",
-            parse_mode="HTML"
-        )
-        
+    except ValueError as e:
+        logger.warning(f"Ошибка разбора даты из календаря: {e}, data={call.data}")
+        bot.answer_callback_query(call.id)
     except Exception as e:
         logger.error(f"Ошибка обработки календаря: {e}")
         bot.answer_callback_query(call.id, "❌ Ошибка при выборе даты. Попробуйте еще раз.", show_alert=True)
@@ -1078,11 +1128,20 @@ def handle_step_input(message):
     elif current_step == 'ask_to':
         user_data[chat_id]['to'] = text
         user_steps[chat_id] = 'ask_date'
+        # Создаем календарь с завтрашней датой по умолчанию
+        from datetime import datetime, timedelta
+        try:
+            default_date = datetime.now() + timedelta(days=1)
+            calendar_keyboard = calendar.create_calendar(year=default_date.year, month=default_date.month)
+        except Exception as e:
+            logger.warning(f"Ошибка создания календаря: {e}")
+            calendar_keyboard = calendar.create_calendar()
+        
         bot.send_message(
             chat_id,
             f"3️⃣ <b>Дата поездки?</b>\nМаршрут: <i>{user_data[chat_id]['from']} → {text}</i>\nВыберите дату в календаре:",
             parse_mode="HTML",
-            reply_markup=calendar.get_calendar()
+            reply_markup=calendar_keyboard
         )
 
     elif current_step == 'ask_date':
@@ -1370,13 +1429,36 @@ def on_view_status(call):
     """Обработчик кнопки просмотра статуса"""
     chat_id = call.message.chat.id
     
-    if chat_id not in tracking_status:
+    if chat_id not in tracking_status and not get_user_trackings(chat_id):
         logger.warning(f"Пользователь {chat_id} попытался просмотреть статус, но отслеживание не активно")
         bot.answer_callback_query(call.id, "ℹ️ У вас нет активного отслеживания", show_alert=True)
         return
     
-    status = tracking_status[chat_id]
+    # Получаем статус из БД если нет в памяти
+    if chat_id not in tracking_status:
+        trackings = get_user_trackings(chat_id)
+        if trackings:
+            tracking = trackings[0]
+            status = {
+                'train_num': tracking['train_num'],
+                'train_time': tracking['train_time'],
+                'seats_available': tracking['seats_available'],
+                'requests_count': tracking['requests_count']
+            }
+        else:
+            bot.answer_callback_query(call.id, "ℹ️ У вас нет активного отслеживания", show_alert=True)
+            return
+    else:
+        status = tracking_status[chat_id]
+    
     info = user_data.get(chat_id, {})
+    if not info and get_user_trackings(chat_id):
+        tracking = get_user_trackings(chat_id)[0]
+        info = {
+            'from': tracking['from_station'],
+            'to': tracking['to_station'],
+            'passengers': tracking['passengers']
+        }
     
     # Логирование просмотра статуса пользователем
     logger.info(f"📊 Пользователь {chat_id} просмотрел статус | Поезд №{status['train_num'] or 'N/A'} ({status['train_time']}) | Мест доступно: {status['seats_available']}")
@@ -1391,6 +1473,114 @@ def on_view_status(call):
     
     bot.answer_callback_query(call.id, "Статус обновлен", show_alert=False)
     bot.send_message(chat_id, msg, parse_mode="HTML")
+
+# Обработчик кнопок главного меню и быстрых действий
+@bot.callback_query_handler(func=lambda call: call.data in ["quick_start", "back_to_main"])
+def on_quick_start(call):
+    """Обработчик кнопки быстрого старта поиска"""
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    # Имитируем команду /track
+    call.message.text = "/track"
+    start_track(call.message)
+
+@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("repeat_search_"))
+def on_repeat_search(call):
+    """Обработчик повтора поиска из истории"""
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id, "🔁 Повторяю поиск...")
+    
+    try:
+        # Разбираем callback_data: repeat_search_FROM_TO_DATE_PASSENGERS
+        parts = call.data.replace("repeat_search_", "").split("_")
+        if len(parts) >= 4:
+            # Последние два элемента - дата и пассажиры
+            passengers = parts[-1]
+            date = parts[-2]
+            # Всё остальное - станции (могут содержать подчеркивания)
+            station_parts = parts[:-2]
+            # Предполагаем, что первая половина - from, вторая - to
+            mid = len(station_parts) // 2
+            from_station = "_".join(station_parts[:mid])
+            to_station = "_".join(station_parts[mid:])
+            
+            # Заменяем подчеркивания на пробелы в названиях станций
+            from_station = from_station.replace("_", " ")
+            to_station = to_station.replace("_", " ")
+            
+            logger.info(f"🔁 Повтор поиска: {from_station} → {to_station} | {date} | {passengers}")
+            
+            # Сохраняем данные и начинаем поиск
+            user_data[chat_id] = {
+                'from': from_station,
+                'to': to_station,
+                'date': date,
+                'passengers': int(passengers)
+            }
+            
+            loading_msg = bot.send_message(
+                chat_id, 
+                f"🔍 Ищу поезда по маршруту {from_station} → {to_station} на {date}..."
+            )
+            
+            trains = get_trains_list(from_station, to_station, date, chat_id)
+            bot.delete_message(chat_id, loading_msg.message_id)
+            
+            if not trains:
+                bot.send_message(chat_id, "❌ Поездов не найдено. Попробуйте другую дату или маршрут.")
+                return
+            
+            show_train_list(chat_id, trains)
+        else:
+            bot.send_message(chat_id, "❌ Ошибка при разборе данных поиска. Используйте /history заново.")
+    except Exception as e:
+        logger.error(f"Ошибка повтора поиска: {e}")
+        bot.send_message(chat_id, f"❌ Ошибка: {e}. Попробуйте начать поиск через /track")
+
+@bot.message_handler(func=lambda message: message.text in ["🚂 Начать поиск", "Начать поиск"])
+def on_start_search_button(message):
+    """Обработчик кнопки 'Начать поиск' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Начать поиск'")
+    start_track(message)
+
+@bot.message_handler(func=lambda message: message.text in ["📊 Мои трекинги", "Мои трекинги"])
+def on_my_trackings_button(message):
+    """Обработчик кнопки 'Мои трекинги' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Мои трекинги'")
+    show_my_trackings(message)
+
+@bot.message_handler(func=lambda message: message.text in ["📜 История", "История"])
+def on_history_button(message):
+    """Обработчик кнопки 'История' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'История'")
+    show_history(message)
+
+@bot.message_handler(func=lambda message: message.text in ["❓ Помощь", "Помощь"])
+def on_help_button(message):
+    """Обработчик кнопки 'Помощь' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Помощь'")
+    show_help(message)
+
+@bot.message_handler(func=lambda message: message.text == "🔙 Назад")
+def on_back_button(message):
+    """Обработчик кнопки 'Назад' - сбрасывает текущий шаг"""
+    chat_id = message.chat.id
+    user_steps.pop(chat_id, None)
+    user_data.pop(chat_id, None)
+    bot.send_message(
+        chat_id,
+        "🔙 Возврат в главное меню. Выберите действие:",
+        reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
+            KeyboardButton("🚂 Начать поиск"),
+            KeyboardButton("📊 Мои трекинги"),
+            KeyboardButton("📜 История"),
+            KeyboardButton("❓ Помощь")
+        )
+    )
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
