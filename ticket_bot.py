@@ -959,7 +959,7 @@ def on_stop_tracking_choice(call):
 
 
 # Обработчик календаря для выбора даты
-@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("cal-"))
+@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("calendar:"))
 def on_calendar_selection(call):
     """Обработчик выбора даты из календаря"""
     chat_id = call.message.chat.id
@@ -971,58 +971,24 @@ def on_calendar_selection(call):
         return
     
     try:
-        # Разбираем callback_data календаря: cal-name-YYYY-MM-DD или cal-name-IGNORE-YYYY-MM-DD
-        parts = call.data.split("-")
-        if len(parts) < 5:
+        # Формат callback_data от telebot-calendar: calendar:ACTION:YEAR:MONTH:DAY
+        # ACTION может быть: MONTHS (навигация по месяцам), DAYS (выбор дня), IGNORE
+        parts = call.data.split(":")
+        if len(parts) < 4:
             bot.answer_callback_query(call.id)
             return
         
-        # Формат: cal-{name}-{action}-{year}-{month}-{day} или cal-{name}-{ignore}-{year}-{month}-{day}
-        # action может быть: PREV-YEAR, PREV-MONTH, NEXT-YEAR, NEXT-MONTH, IGNORE, или день (01-31)
-        action = parts[2]
+        action = parts[1]  # MONTHS, DAYS, IGNORE
+        year = int(parts[2])
+        month = int(parts[3])
+        day = int(parts[4]) if len(parts) > 4 and parts[4] != '!' else 1
         
-        # Если это навигация (не выбор дня), просто обновляем календарь
-        if action in ['PREV-YEAR', 'PREV-MONTH', 'NEXT-YEAR', 'NEXT-MONTH', 'IGNORE']:
-            # Для навигации используем calendar_query_handler
-            year = int(parts[3])
-            month = int(parts[4])
-            day = int(parts[5]) if len(parts) > 5 else 1
-            
-            result = calendar.calendar_query_handler(bot, call, parts[1], action, year, month, day)
-            if result:
-                # Дата выбрана
-                selected_date = result
-                date_str = selected_date.strftime("%Y-%m-%d")
-                
-                # Проверяем, что дата не в прошлом
-                from datetime import date
-                if selected_date < date.today():
-                    bot.answer_callback_query(call.id, "❌ Нельзя выбрать прошедшую дату", show_alert=True)
-                    return
-                
-                # Сохраняем дату и переходим к следующему шагу
-                user_data[chat_id]['date'] = date_str
-                user_steps[chat_id] = 'ask_passengers'
-                
-                bot.answer_callback_query(call.id, f"✅ Дата выбрана: {date_str}")
-                bot.send_message(
-                    chat_id,
-                    f"4️⃣ <b>Сколько пассажиров?</b>\nДата: <i>{date_str}</i>\nВведите число (1, 2, 3...):",
-                    parse_mode="HTML"
-                )
-            else:
-                # Календарь обновлен, ждем дальнейшего выбора
-                bot.answer_callback_query(call.id)
-            return
+        # Используем встроенный обработчик календаря
+        result = calendar.calendar_query_handler(bot, call, "date_select", action, year, month, day)
         
-        # Если action - это день (01-31), то дата выбрана
-        if action.isdigit() and 1 <= int(action) <= 31:
-            year = int(parts[3])
-            month = int(parts[4])
-            day = int(action)
-            
-            from datetime import datetime
-            selected_date = datetime(year, month, day)
+        if result:
+            # Дата выбрана
+            selected_date = result
             date_str = selected_date.strftime("%Y-%m-%d")
             
             # Проверяем, что дата не в прошлом
@@ -1042,6 +1008,7 @@ def on_calendar_selection(call):
                 parse_mode="HTML"
             )
         else:
+            # Календарь обновлен (навигация), ждем дальнейшего выбора
             bot.answer_callback_query(call.id)
         
     except ValueError as e:
