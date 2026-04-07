@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 import requests
 from bs4 import BeautifulSoup
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from telebot_calendar import Calendar, RUSSIAN_LANGUAGE
 from dotenv import load_dotenv
 import os
 import logging
@@ -122,6 +123,9 @@ if not TOKEN:
     exit(1)
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
+
+# Инициализация календаря для выбора даты
+calendar = Calendar(language=RUSSIAN_LANGUAGE)
 
 # Инициализация UserAgent с обработкой ошибок
 try:
@@ -394,7 +398,7 @@ def restore_active_trackings(bot_instance):
 init_database()
 
 # Запрещенные символы для XSS защиты
-FORBIDDEN_CHARS_PATTERN = re.compile(r'[<>\"\'&]')
+FORBIDDEN_CHARS_PATTERN = re.compile(r'''[<>"'&]''')
 
 
 # --- ХРАНИЛИЩЕ ДАННЫХ И СОСТОЯНИЙ (IN-MEMORY) ---
@@ -929,26 +933,73 @@ def on_stop_tracking_choice(call):
         tracking_status.pop(chat_id, None)
         heartbeat_enabled.discard(chat_id)
         heartbeat_intervals.pop(chat_id, None)
+        user_steps.pop(chat_id, None)
+        bot.answer_callback_query(call.id, "✅ Все трекинги остановлены")
+        bot.send_message(chat_id, "⏹ Все трекинги остановлены.")
+        return
+
+    # Останавливаем конкретный трекинг
+    train_time = call.data.replace("stop_tracking_", "")
+    remove_tracking_from_db(chat_id, train_time)
+    
+    # Очищаем in-memory данные
+    if chat_id in active_jobs:
+        job = active_jobs[chat_id]
+        if job.get('train_time') == train_time:
+            job['stop_flag'] = True
+            active_jobs.pop(chat_id)
+    
+    tracking_status.pop(chat_id, None)
+    heartbeat_enabled.discard(chat_id)
+    heartbeat_intervals.pop(chat_id, None)
+    user_steps.pop(chat_id, None)
+    
+    bot.answer_callback_query(call.id, "✅ Трекинг остановлен")
+    bot.send_message(chat_id, f"⏹ Трекинг на {train_time} остановлен.")
+
+
+# Обработчик календаря для выбора даты
+@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("cal-"))
+def on_calendar_selection(call):
+    """Обработчик выбора даты из календаря"""
+    chat_id = call.message.chat.id
+    
+    # Проверяем, что пользователь находится на шаге выбора даты
+    current_step = user_steps.get(chat_id)
+    if current_step != 'ask_date':
+        bot.answer_callback_query(call.id, "⚠️ Сейчас не требуется выбор даты", show_alert=True)
+        return
+    
+    try:
+        # Получаем выбранную дату из календаря
+        selected_date = calendar.get_date(call.data)
+        if selected_date is None:
+            # Пользователь навигирует по календарю (месяц/год), а не выбирает дату
+            bot.answer_callback_query(call.id)
+            return
         
-        bot.answer_callback_query(call.id, "✅ Все трекинги остановлены!", show_alert=True)
-        bot.send_message(chat_id, "✅ Все активные трекинги успешно остановлены.")
-        logger.info(f"⏹ Пользователь {chat_id} остановил ВСЕ трекинги")
-    else:
-        # Останавливаем конкретный трекинг
-        train_time = call.data.replace("stop_tracking_", "")
-        remove_tracking_from_db(chat_id, train_time)
+        date_str = selected_date.strftime("%Y-%m-%d")
         
-        # Обновляем in-memory статус если это тот же трек
-        if chat_id in tracking_status and tracking_status[chat_id].get('train_time') == train_time:
-            tracking_status.pop(chat_id, None)
-            if chat_id in active_jobs:
-                active_jobs.pop(chat_id)
-            heartbeat_enabled.discard(chat_id)
-            heartbeat_intervals.pop(chat_id, None)
+        # Проверяем, что дата не в прошлом
+        from datetime import date
+        if selected_date < date.today():
+            bot.answer_callback_query(call.id, "❌ Нельзя выбрать прошедшую дату", show_alert=True)
+            return
         
-        bot.answer_callback_query(call.id, "✅ Трекинг остановлен!", show_alert=True)
-        bot.send_message(chat_id, f"✅ Трекинг на {train_time} успешно остановлен.")
-        logger.info(f"⏹ Пользователь {chat_id} остановил трекинг на {train_time}")
+        # Сохраняем дату и переходим к следующему шагу
+        user_data[chat_id]['date'] = date_str
+        user_steps[chat_id] = 'ask_passengers'
+        
+        bot.answer_callback_query(call.id, f"✅ Дата выбрана: {date_str}")
+        bot.send_message(
+            chat_id,
+            f"4️⃣ <b>Сколько пассажиров?</b>\nДата: <i>{date_str}</i>\nВведите число (1, 2, 3...):",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки календаря: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка при выборе даты. Попробуйте еще раз.", show_alert=True)
 
 @bot.message_handler(commands=['status'])
 def show_tracking_status(message):
@@ -1029,8 +1080,9 @@ def handle_step_input(message):
         user_steps[chat_id] = 'ask_date'
         bot.send_message(
             chat_id,
-            f"3️⃣ <b>Дата поездки?</b>\nМаршрут: <i>{user_data[chat_id]['from']} → {text}</i>\nВведите дату в формате ГГГГ-ММ-ДД (например: 2026-05-20):",
-            parse_mode="HTML"
+            f"3️⃣ <b>Дата поездки?</b>\nМаршрут: <i>{user_data[chat_id]['from']} → {text}</i>\nВыберите дату в календаре:",
+            parse_mode="HTML",
+            reply_markup=calendar.get_calendar()
         )
 
     elif current_step == 'ask_date':
