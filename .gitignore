@@ -1,11 +1,4 @@
 ```
-# Compiled Python files
-*.pyc
-__pycache__/
-
-# Database files
-*.db
-
 # Environment files
 .env
 .env.local
@@ -13,30 +6,34 @@ __pycache__/
 
 # Logs
 *.log
+logs/
 
-# Editor/IDE files
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.venv-bak/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git/
+*.sublime-project
+*.sublime-workspace
 .vscode/
 .idea/
-*.swp
-*.swo
-*.tmp
-
-# Dependencies
-.venv/
-venv/
-node_modules/
-
-# Build artifacts
-dist/
-build/
-target/
-
-# Coverage reports
-.coverage
-coverage/
-htmlcov/
-
-# OS generated files
-.DS_Store
-Thumbs.db
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
 ```
