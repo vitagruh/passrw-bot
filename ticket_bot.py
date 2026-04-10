@@ -313,8 +313,12 @@ def save_user(chat_id: int, username: str = None, first_name: str = None, last_n
 
 def save_tracking_to_db(chat_id: int, from_station: str, to_station: str, 
                         date: str, passengers: int, train_time: str, 
-                        heartbeat_enabled: bool = False, heartbeat_interval: int = 1800):
-    """Сохраняет активный трекинг в базу данных"""
+                        heartbeat_enabled: bool = False, heartbeat_interval: int = 1800) -> int:
+    """
+    Сохраняет активный трекинг в базу данных.
+    
+    :return: ID созданной записи (tracking_id)
+    """
     with get_db_cursor() as cursor:
         cursor.execute("""
             INSERT INTO active_trackings 
@@ -323,11 +327,25 @@ def save_tracking_to_db(chat_id: int, from_station: str, to_station: str,
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (chat_id, from_station, to_station, date, passengers, train_time,
               1 if heartbeat_enabled else 0, heartbeat_interval))
+        return cursor.lastrowid
 
-def remove_tracking_from_db(chat_id: int, train_time: str = None):
-    """Удаляет трекинг из базы данных"""
+def remove_tracking_from_db(chat_id: int, train_time: str = None, tracking_id: int = None):
+    """
+    Удаляет трекинг из базы данных.
+    
+    :param tracking_id: Уникальный ID трекинга (приоритетный параметр)
+    :param chat_id: ID чата пользователя
+    :param train_time: Время отправления поезда
+    """
     with get_db_cursor() as cursor:
-        if train_time:
+        if tracking_id:
+            # Удаляем по уникальному ID (наиболее точный способ)
+            cursor.execute("""
+                DELETE FROM active_trackings 
+                WHERE id = ? AND chat_id = ?
+            """, (tracking_id, chat_id))
+        elif train_time:
+            # Fallback для старых записей без tracking_id
             cursor.execute("""
                 DELETE FROM active_trackings 
                 WHERE chat_id = ? AND train_time = ?
@@ -422,6 +440,9 @@ def restore_active_trackings(bot_instance):
     restored_count = 0
     for tracking in trackings:
         chat_id = tracking['chat_id']
+        train_time = tracking['train_time']
+        tracking_id = tracking['id']  # Получаем уникальный ID трекинга из БД
+        tracking_key = make_tracking_key(chat_id, train_time, tracking_id)
         
         # Восстанавливаем данные в памяти
         user_data[chat_id] = {
@@ -431,13 +452,13 @@ def restore_active_trackings(bot_instance):
             'passengers': tracking['passengers']
         }
         
-        # Восстанавливаем heartbeat настройки
+        # Восстанавливаем heartbeat настройки (теперь используем tracking_key)
         if tracking['heartbeat_enabled']:
-            heartbeat_enabled.add(chat_id)
-            heartbeat_intervals[chat_id] = tracking['heartbeat_interval']
+            heartbeat_enabled.add(tracking_key)
+            heartbeat_intervals[tracking_key] = tracking['heartbeat_interval']
         
         # Запускаем поток трекинга
-        log_message = f"From: {tracking['from_station']}, To: {tracking['to_station']}, Date: {tracking['date']}, Train: {tracking['train_time']}"
+        log_message = f"From: {tracking['from_station']}, To: {tracking['to_station']}, Date: {tracking['date']}, Train: {tracking['train_time']}, ID: {tracking_id}"
         # Создаем фейковый объект message для логирования (так как восстановление происходит без сообщения)
         class FakeMessage:
             from_user = type('User', (), {'id': chat_id, 'username': None, 'full_name': 'RestoredTrack', 'language_code': 'unknown', 'is_bot': False})()
@@ -448,14 +469,20 @@ def restore_active_trackings(bot_instance):
         thread = threading.Thread(
             target=tracking_worker,
             args=(chat_id, tracking['from_station'], tracking['to_station'], 
-                  tracking['date'], tracking['train_time']),
+                  tracking['date'], tracking['train_time'], tracking_id),
             daemon=True
         )
         thread.start()
-        active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
+        active_jobs[tracking_key] = {
+            'thread': thread, 
+            'stop_flag': False, 
+            'chat_id': chat_id, 
+            'train_time': train_time,
+            'tracking_id': tracking_id
+        }
         
         # Восстанавливаем статус трекинга с сохранением счетчика запросов из БД
-        tracking_status[chat_id] = {
+        tracking_status[tracking_key] = {
             'train_num': tracking['train_num'],
             'train_time': tracking['train_time'],
             'seats_available': tracking['seats_available'],
@@ -463,7 +490,7 @@ def restore_active_trackings(bot_instance):
         }
         
         restored_count += 1
-        logger.info(f"🔄 Восстановлен трекинг для пользователя {chat_id}: {tracking['from_station']} → {tracking['to_station']}")
+        logger.info(f"🔄 Восстановлен трекинг #{tracking_id} для пользователя {chat_id}: {tracking['from_station']} → {tracking['to_station']} (поезд {train_time})")
     
     if restored_count > 0:
         logger.info(f"✅ Восстановлено {restored_count} активных трекингов после перезапуска")
@@ -480,16 +507,54 @@ FORBIDDEN_CHARS_PATTERN = re.compile(r'''[<>"'&]''')
 
 
 # --- ХРАНИЛИЩЕ ДАННЫХ И СОСТОЯНИЙ (IN-MEMORY) ---
-active_jobs = {}  # {chat_id: {'thread': thread, 'stop_flag': False}}
+# Уникальный ключ трекинга: f"{chat_id}:{train_time}"
+active_jobs = {}  # {tracking_key: {'thread': thread, 'stop_flag': False, 'chat_id': chat_id, 'train_time': train_time}}
 user_steps = {}   # {chat_id: 'step_name'} - текущий шаг пользователя
 user_data = {}    # {chat_id: {'from': ..., 'to': ..., 'date': ..., 'passengers': ...}}
-heartbeat_enabled = set()  # Множество chat_id, у которых включен heartbeat
+heartbeat_enabled = set()  # Множество tracking_key, у которых включен heartbeat
 
-# Хранилище интервалов heartbeat: {chat_id: interval_seconds}
+# Хранилище интервалов heartbeat: {tracking_key: interval_seconds}
 heartbeat_intervals = {}
 
-# Хранилище статусов отслеживания: {chat_id: {'train_num': ..., 'train_time': ..., 'seats_available': ..., 'requests_count': ...}}
+# Хранилище статусов отслеживания: {tracking_key: {'train_num': ..., 'train_time': ..., 'seats_available': ..., 'requests_count': ...}}
 tracking_status = {}
+
+def make_tracking_key(chat_id: int, train_time: str, tracking_id: int = None) -> str:
+    """
+    Создает уникальный ключ трекинга.
+    
+    Best practices:
+    - Используем tracking_id из БД как основной идентификатор (гарантированно уникальный)
+    - Для обратной совместимости поддерживаем формат chat_id:train_time если tracking_id не передан
+    - Формат: "{chat_id}:{train_time}:{tracking_id}" или "{chat_id}:{train_time}" для старых записей
+    """
+    if tracking_id is not None:
+        return f"{chat_id}:{train_time}:{tracking_id}"
+    return f"{chat_id}:{train_time}"
+
+def parse_tracking_key(key: str) -> dict:
+    """
+    Разбирает ключ трекинга на компоненты.
+    
+    :return: dict с ключами 'chat_id', 'train_time', 'tracking_id' (может быть None)
+    """
+    parts = key.split(':')
+    if len(parts) >= 3:
+        # Новый формат с tracking_id
+        return {
+            'chat_id': int(parts[0]),
+            'train_time': parts[1],
+            'tracking_id': int(parts[2]) if parts[2].isdigit() else None
+        }
+    elif len(parts) == 2:
+        # Старый формат без tracking_id
+        return {
+            'chat_id': int(parts[0]),
+            'train_time': parts[1],
+            'tracking_id': None
+        }
+    else:
+        raise ValueError(f"Некорректный ключ трекинга: {key}")
 
 # Rate limiting: {chat_id: {'last_request': timestamp, 'request_count': int}}
 rate_limit_store = {}
@@ -670,48 +735,73 @@ def parse_carriage_info(status_cell):
 
 # --- ФУНКЦИИ ОТСЛЕЖИВАНИЯ ---
 
-def tracking_worker(chat_id, from_station, to_station, date, selected_time):
+def tracking_worker(chat_id, from_station, to_station, date, selected_time, tracking_id=None):
+    """
+    Рабочий поток для отслеживания наличия билетов.
+    
+    Best practices:
+    - Уникальный идентификатор трекинга через tracking_id из БД
+    - Проверка флагов остановки в каждом цикле
+    - Graceful shutdown при получении сигнала
+    - Сохранение счетчика запросов
+    
+    :param tracking_id: Уникальный ID трекинга из БД (гарантирует уникальность даже при одинаковых параметрах)
+    """
+    # Создаем уникальный ключ трекинга с использованием tracking_id
+    tracking_key = make_tracking_key(chat_id, selected_time, tracking_id)
+    
     # Создаем фейковый объект message для логирования внутри потока
     class FakeMessage:
         from_user = type('User', (), {'id': chat_id, 'username': None, 'full_name': 'TrackingWorker', 'language_code': 'unknown', 'is_bot': False})()
         chat = type('Chat', (), {'id': chat_id})()
     fake_msg = FakeMessage()
     
-    log_action(fake_msg, "TRACKING_STARTED", f"From: {from_station}, To: {to_station}, Date: {date}, Train: {selected_time}")
+    log_action(fake_msg, "TRACKING_STARTED", f"From: {from_station}, To: {to_station}, Date: {date}, Train: {selected_time}, TrackingID: {tracking_id}")
     
     num_passengers = user_data[chat_id].get('passengers', 1)
     last_heartbeat = time.time()
-    # Получаем интервал heartbeat для этого пользователя (по умолчанию 1800 сек = 30 мин)
-    hb_interval = heartbeat_intervals.get(chat_id, 1800)
+    # Получаем интервал heartbeat для этого трекинга (по умолчанию 1800 сек = 30 мин)
+    hb_interval = heartbeat_intervals.get(tracking_key, 1800)
     
-    # Инициализация статуса отслеживания для пользователя
-    tracking_status[chat_id] = {
-        'train_num': None,
-        'train_time': selected_time,
-        'seats_available': 0,
-        'requests_count': 0
-    }
+    # Инициализация статуса отслеживания для этого трекинга (с сохранением счетчика при восстановлении)
+    if tracking_key not in tracking_status:
+        tracking_status[tracking_key] = {
+            'train_num': None,
+            'train_time': selected_time,
+            'seats_available': 0,
+            'requests_count': 0
+        }
 
-    while chat_id in active_jobs:
+    while tracking_key in active_jobs:
         try:
             # === ПРОВЕРКА СИНХРОНИЗАЦИИ С АДМИН-ПАНЕЛЬЮ ===
             # Проверяем наличие запроса на остановку от админ-панели
-            if check_stop_request(chat_id, selected_time):
-                logger.info(f"🛑 Получен запрос на остановку трекинга от админ-панели: {chat_id}:{selected_time}")
-                break
-            
-            # Проверяем существование трекинга в БД (защита от прямого удаления через админку)
-            if not is_tracking_active_in_db(chat_id, selected_time):
-                logger.warning(f"⚠️ Трекинг {chat_id}:{selected_time} удален из БД напрямую. Завершаем поток.")
-                break
+            # Если tracking_id указан, используем его для точной идентификации
+            if tracking_id:
+                if check_stop_request(chat_id, selected_time, tracking_id):
+                    logger.info(f"🛑 Получен запрос на остановку трекинга #{tracking_id} от админ-панели: {chat_id}:{selected_time}")
+                    break
+                
+                # Проверяем существование трекинга в БД по уникальному ID (защита от прямого удаления через админку)
+                if not is_tracking_active_in_db(chat_id, selected_time, tracking_id):
+                    logger.warning(f"⚠️ Трекинг #{tracking_id} ({chat_id}:{selected_time}) удален из БД напрямую. Завершаем поток.")
+                    break
+            else:
+                # Fallback для старых записей без tracking_id
+                if check_stop_request(chat_id, selected_time):
+                    logger.info(f"🛑 Получен запрос на остановку трекинга от админ-панели: {chat_id}:{selected_time}")
+                    break
+                
+                if not is_tracking_active_in_db(chat_id, selected_time):
+                    logger.warning(f"⚠️ Трекинг {chat_id}:{selected_time} удален из БД напрямую. Завершаем поток.")
+                    break
             # ==================================================
             
             # Увеличиваем счетчик запросов
-            if chat_id in tracking_status:
-                tracking_status[chat_id]['requests_count'] += 1
+            tracking_status[tracking_key]['requests_count'] += 1
             
             # Отправка heartbeat сообщения если включено и прошел заданный интервал
-            if chat_id in heartbeat_enabled and (time.time() - last_heartbeat) >= hb_interval:
+            if tracking_key in heartbeat_enabled and (time.time() - last_heartbeat) >= hb_interval:
                 log_action(fake_msg, "HEARTBEAT_SENT", f"Train: {selected_time}, Interval: {hb_interval}s")
                 bot.send_message(chat_id, "💓 Бот работает, проверяю билеты...")
                 last_heartbeat = time.time()
@@ -725,24 +815,23 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 continue
             
             # Обновляем информацию о поезде в статусе
-            if chat_id in tracking_status:
-                tracking_status[chat_id]['train_num'] = current_train['num']
-                # Находим максимальное количество доступных мест среди всех вагонов
-                max_seats = 0
-                for c in current_train['parsed_info']:
-                    if c['seats'].isdigit():
-                        seats = int(c['seats'])
-                        if seats > max_seats:
-                            max_seats = seats
-                tracking_status[chat_id]['seats_available'] = max_seats
+            tracking_status[tracking_key]['train_num'] = current_train['num']
+            # Находим максимальное количество доступных мест среди всех вагонов
+            max_seats = 0
+            for c in current_train['parsed_info']:
+                if c['seats'].isdigit():
+                    seats = int(c['seats'])
+                    if seats > max_seats:
+                        max_seats = seats
+            tracking_status[tracking_key]['seats_available'] = max_seats
             
-            # Обновляем статус в базе данных
+            # Обновляем статус в базе данных с текущим счетчиком запросов
             update_tracking_status(
                 chat_id, 
                 selected_time, 
-                tracking_status[chat_id]['seats_available'],
-                tracking_status[chat_id]['train_num'],
-                tracking_status[chat_id]['requests_count']
+                tracking_status[tracking_key]['seats_available'],
+                tracking_status[tracking_key]['train_num'],
+                tracking_status[tracking_key]['requests_count']
             )
 
             suitable = [
@@ -756,10 +845,11 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 bot.send_message(chat_id, msg, parse_mode="HTML")
                 send_detailed_train_info(chat_id, current_train, num_passengers)
                 
-                active_jobs.pop(chat_id, None)
-                heartbeat_enabled.discard(chat_id)  # Убираем из heartbeat при успехе
-                heartbeat_intervals.pop(chat_id, None)  # Очищаем интервал при успехе
-                tracking_status.pop(chat_id, None)  # Очищаем статус при успехе
+                # Очищаем in-memory данные для этого трекинга
+                active_jobs.pop(tracking_key, None)
+                heartbeat_enabled.discard(tracking_key)
+                heartbeat_intervals.pop(tracking_key, None)
+                tracking_status.pop(tracking_key, None)
                 
                 # Удаляем из базы данных после успешного завершения
                 remove_tracking_from_db(chat_id, selected_time)
@@ -771,7 +861,7 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
             time.sleep(CHECK_INTERVAL)
             
         except Exception as e:
-            logger.error(f"Ошибка в потоке трекинга {chat_id}: {e}", exc_info=True)
+            logger.error(f"Ошибка в потоке трекинга {chat_id}:{selected_time}: {e}", exc_info=True)
             time.sleep(CHECK_INTERVAL)
     
     # === ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ПОТОКА ===
@@ -779,10 +869,10 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
     # Очищаем in-memory данные и подтверждаем остановку
     logger.info(f"🏁 Завершение потока трекинга для {chat_id}:{selected_time}")
     
-    active_jobs.pop(chat_id, None)
-    heartbeat_enabled.discard(chat_id)
-    heartbeat_intervals.pop(chat_id, None)
-    tracking_status.pop(chat_id, None)
+    active_jobs.pop(tracking_key, None)
+    heartbeat_enabled.discard(tracking_key)
+    heartbeat_intervals.pop(tracking_key, None)
+    tracking_status.pop(tracking_key, None)
     
     # Подтверждаем остановку в системе синхронизации
     confirm_tracking_stopped(chat_id, selected_time)
@@ -1038,12 +1128,21 @@ def on_stop_tracking_choice(call):
         # Останавливаем все трекинги пользователя
         remove_tracking_from_db(chat_id)
         
-        # Очищаем in-memory данные
-        if chat_id in active_jobs:
-            active_jobs.pop(chat_id)
-        tracking_status.pop(chat_id, None)
-        heartbeat_enabled.discard(chat_id)
-        heartbeat_intervals.pop(chat_id, None)
+        # Очищаем in-memory данные - ищем все трекинги этого пользователя
+        keys_to_remove = [key for key in active_jobs.keys() if key.startswith(f"{chat_id}:")]
+        for key in keys_to_remove:
+            job = active_jobs.get(key)
+            if job:
+                job['stop_flag'] = True
+            active_jobs.pop(key, None)
+        
+        # Очищаем статусы и heartbeat для всех трекингов пользователя
+        keys_to_clean = [key for key in list(tracking_status.keys()) + list(heartbeat_enabled) + list(heartbeat_intervals.keys()) if key.startswith(f"{chat_id}:")]
+        for key in keys_to_clean:
+            tracking_status.pop(key, None)
+            heartbeat_enabled.discard(key)
+            heartbeat_intervals.pop(key, None)
+        
         user_steps.pop(chat_id, None)
         bot.answer_callback_query(call.id, "✅ Все трекинги остановлены")
         bot.send_message(chat_id, "⏹ Все трекинги остановлены.")
@@ -1051,18 +1150,19 @@ def on_stop_tracking_choice(call):
 
     # Останавливаем конкретный трекинг
     train_time = call.data.replace("stop_tracking_", "")
+    tracking_key = make_tracking_key(chat_id, train_time)
+    
     remove_tracking_from_db(chat_id, train_time)
     
     # Очищаем in-memory данные
-    if chat_id in active_jobs:
-        job = active_jobs[chat_id]
-        if job.get('train_time') == train_time:
-            job['stop_flag'] = True
-            active_jobs.pop(chat_id)
+    if tracking_key in active_jobs:
+        job = active_jobs[tracking_key]
+        job['stop_flag'] = True
+        active_jobs.pop(tracking_key)
     
-    tracking_status.pop(chat_id, None)
-    heartbeat_enabled.discard(chat_id)
-    heartbeat_intervals.pop(chat_id, None)
+    tracking_status.pop(tracking_key, None)
+    heartbeat_enabled.discard(tracking_key)
+    heartbeat_intervals.pop(tracking_key, None)
     user_steps.pop(chat_id, None)
     
     bot.answer_callback_query(call.id, "✅ Трекинг остановлен")
@@ -1413,9 +1513,10 @@ def on_heartbeat_choice(call):
             bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
             return
         
-        # Сохраняем интервал и включаем heartbeat
-        heartbeat_intervals[chat_id] = interval_seconds
-        heartbeat_enabled.add(chat_id)
+        # Сохраняем интервал и включаем heartbeat (теперь используем tracking_key)
+        tracking_key = make_tracking_key(chat_id, sel_time)
+        heartbeat_intervals[tracking_key] = interval_seconds
+        heartbeat_enabled.add(tracking_key)
         
         minutes = interval_seconds // 60
         if minutes >= 60:
@@ -1433,9 +1534,10 @@ def on_heartbeat_choice(call):
             bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
             return
         
-        # Отключаем heartbeat
-        heartbeat_enabled.discard(chat_id)
-        heartbeat_intervals.pop(chat_id, None)
+        # Отключаем heartbeat (используем tracking_key)
+        tracking_key = make_tracking_key(chat_id, sel_time)
+        heartbeat_enabled.discard(tracking_key)
+        heartbeat_intervals.pop(tracking_key, None)
         bot.answer_callback_query(call.id, "✅ Мониторинг запущен без heartbeat.", show_alert=False)
     
     # Запуск трекинга (для обоих случаев)
@@ -1445,6 +1547,8 @@ def on_heartbeat_choice(call):
             bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
             return
         
+        tracking_key = make_tracking_key(chat_id, sel_time)
+        
         # Сохраняем трекинг в базу данных
         save_tracking_to_db(
             chat_id, 
@@ -1453,8 +1557,8 @@ def on_heartbeat_choice(call):
             info['date'], 
             info['passengers'], 
             sel_time,
-            chat_id in heartbeat_enabled,
-            heartbeat_intervals.get(chat_id, 1800)
+            tracking_key in heartbeat_enabled,
+            heartbeat_intervals.get(tracking_key, 1800)
         )
         
         # Сохраняем поиск в историю
@@ -1466,9 +1570,9 @@ def on_heartbeat_choice(call):
             daemon=True
         )
         thread.start()
-        active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
+        active_jobs[tracking_key] = {'thread': thread, 'stop_flag': False, 'chat_id': chat_id, 'train_time': sel_time}
         
-        hb_status = "включен" if chat_id in heartbeat_enabled else "выключен"
+        hb_status = "включен" if tracking_key in heartbeat_enabled else "выключен"
         logger.info(f"✅ Мониторинг активирован: Пользователь {chat_id} -> Поезд №{sel_num} ({sel_time}) | heartbeat={hb_status}")
         
         # Отправляем сообщение об успешном создании задачи отслеживания
