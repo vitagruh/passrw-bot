@@ -19,6 +19,15 @@ from fake_useragent import UserAgent
 from contextlib import contextmanager
 from typing import Optional, Dict, List, Any
 
+# Импорт модуля синхронизации для интеграции с админ-панелью
+from tracking_sync import (
+    check_stop_request,
+    is_tracking_active_in_db,
+    confirm_tracking_stopped,
+    cleanup_old_sync_flags,
+    get_pending_sync_actions
+)
+
 
 # ============================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ (BEST PRACTICES)
@@ -445,12 +454,12 @@ def restore_active_trackings(bot_instance):
         thread.start()
         active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
         
-        # Восстанавливаем статус трекинга
+        # Восстанавливаем статус трекинга с сохранением счетчика запросов из БД
         tracking_status[chat_id] = {
             'train_num': tracking['train_num'],
             'train_time': tracking['train_time'],
             'seats_available': tracking['seats_available'],
-            'requests_count': tracking['requests_count']
+            'requests_count': tracking['requests_count'] if tracking['requests_count'] else 0
         }
         
         restored_count += 1
@@ -458,6 +467,10 @@ def restore_active_trackings(bot_instance):
     
     if restored_count > 0:
         logger.info(f"✅ Восстановлено {restored_count} активных трекингов после перезапуска")
+    
+    # Очищаем старые флаги синхронизации при старте
+    cleanup_old_sync_flags(max_age_hours=24)
+    logger.info("🧹 Выполнена очистка старых флагов синхронизации")
 
 # Инициализация базы данных при старте
 init_database()
@@ -681,6 +694,18 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
 
     while chat_id in active_jobs:
         try:
+            # === ПРОВЕРКА СИНХРОНИЗАЦИИ С АДМИН-ПАНЕЛЬЮ ===
+            # Проверяем наличие запроса на остановку от админ-панели
+            if check_stop_request(chat_id, selected_time):
+                logger.info(f"🛑 Получен запрос на остановку трекинга от админ-панели: {chat_id}:{selected_time}")
+                break
+            
+            # Проверяем существование трекинга в БД (защита от прямого удаления через админку)
+            if not is_tracking_active_in_db(chat_id, selected_time):
+                logger.warning(f"⚠️ Трекинг {chat_id}:{selected_time} удален из БД напрямую. Завершаем поток.")
+                break
+            # ==================================================
+            
             # Увеличиваем счетчик запросов
             if chat_id in tracking_status:
                 tracking_status[chat_id]['requests_count'] += 1
@@ -748,7 +773,21 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
         except Exception as e:
             logger.error(f"Ошибка в потоке трекинга {chat_id}: {e}", exc_info=True)
             time.sleep(CHECK_INTERVAL)
-
+    
+    # === ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ПОТОКА ===
+    # Поток завершился (по любой причине: stop_flag, удаление из БД, успех)
+    # Очищаем in-memory данные и подтверждаем остановку
+    logger.info(f"🏁 Завершение потока трекинга для {chat_id}:{selected_time}")
+    
+    active_jobs.pop(chat_id, None)
+    heartbeat_enabled.discard(chat_id)
+    heartbeat_intervals.pop(chat_id, None)
+    tracking_status.pop(chat_id, None)
+    
+    # Подтверждаем остановку в системе синхронизации
+    confirm_tracking_stopped(chat_id, selected_time)
+    
+    log_action(fake_msg, "TRACKING_STOPPED", f"Train: {selected_time}, Graceful shutdown completed")
 
 def send_detailed_train_info(chat_id, train, num_passengers=None):
     lines = [
