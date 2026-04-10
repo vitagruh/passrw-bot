@@ -33,6 +33,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import telebot
 from dotenv import load_dotenv
 
+# Импорт модуля синхронизации для интеграции с ботом
+from tracking_sync import (
+    request_tracking_stop,
+    force_delete_tracking,
+    create_sync_table
+)
+
 # Загрузка переменных окружения
 load_dotenv()
 
@@ -52,6 +59,9 @@ FLASK_HOST = os.getenv("FLASK_HOST", "127.0.0.1")
 if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_TOKEN не найден в .env")
     exit(1)
+
+# Инициализация таблицы синхронизации при старте админ-панели
+create_sync_table()
 
 # Инициализация бота для отправки сообщений
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
@@ -988,18 +998,33 @@ def tracking_detail(tracking_id):
 @app.route('/tracking/<int:tracking_id>/delete', methods=['POST'])
 @login_required
 def delete_tracking(tracking_id):
-    """Удаление трекинга"""
+    """Удаление трекинга с синхронизацией с ботом"""
     tracking = get_tracking_by_id(tracking_id)
     if tracking:
-        if delete_tracking_db(tracking_id):
+        chat_id = tracking['chat_id']
+        train_time = tracking['train_time']
+        
+        # Сначала запрашиваем остановку через систему синхронизации
+        # Это корректно остановит поток в боте
+        if request_tracking_stop(chat_id, train_time, session.get('admin_username')):
+            # Флаг установлен, бот сам удалит запись после остановки потока
             log_admin_action(
                 session['admin_username'], 
                 'DELETE_TRACKING', 
-                f'Удален трекинг #{tracking_id} для пользователя {tracking["chat_id"]}'
+                f'Запрошена остановка трекинга #{tracking_id} для пользователя {chat_id} (поезд {train_time})'
             )
-            flash('✅ Трекинг удален', 'success')
+            flash('✅ Запрос на остановку трекинга отправлен. Бот остановит мониторинг.', 'success')
         else:
-            flash('❌ Ошибка при удалении', 'danger')
+            # Если не удалось установить флаг, используем принудительное удаление
+            if force_delete_tracking(chat_id, train_time):
+                log_admin_action(
+                    session['admin_username'], 
+                    'FORCE_DELETE_TRACKING', 
+                    f'Принудительно удален трекинг #{tracking_id} для пользователя {chat_id}'
+                )
+                flash('⚠️ Трекинг удален принудительно. Бот обнаружит это при следующей проверке.', 'warning')
+            else:
+                flash('❌ Ошибка при удалении трекинга', 'danger')
     else:
         flash('❌ Трекинг не найден', 'danger')
     
