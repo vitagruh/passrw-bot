@@ -223,25 +223,17 @@ def confirm_tracking_stopped(chat_id: int, train_time: str = None, tracking_id: 
             actual_train_time = tracking['train_time']
             
             # Записываем историю перед удалением (сохраняем счетчики)
+            # Примечание: структура таблицы request_counter_history может отличаться,
+            # поэтому вставляем только гарантированно существующие поля
             cursor.execute("""
                 INSERT INTO request_counter_history 
-                (tracking_id, chat_id, from_station, to_station, train_time, train_num,
-                 final_requests_count, last_request_count, seats_found, reason, 
-                 unique_token, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (tracking_id, chat_id, requests_count, reason)
+                VALUES (?, ?, ?, ?)
             """, (
                 actual_tracking_id,
                 actual_chat_id,
-                tracking['from_station'],
-                tracking['to_station'],
-                actual_train_time,
-                tracking['train_num'],
                 tracking['requests_count'],
-                tracking['last_request_count'],
-                tracking['seats_available'],
-                reason,
-                tracking['unique_token'],
-                tracking['created_at']
+                reason
             ))
             
             logger.info(
