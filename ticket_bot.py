@@ -317,16 +317,23 @@ def save_tracking_to_db(chat_id: int, from_station: str, to_station: str,
     """
     Сохраняет активный трекинг в базу данных.
     
+    Best practices:
+    - Генерация уникального токена для каждого трекинга
+    - Возврат tracking_id для точной идентификации
+    
     :return: ID созданной записи (tracking_id)
     """
+    import uuid
+    unique_token = f"{uuid.uuid4().hex[:16]}_{int(time.time())}"
+    
     with get_db_cursor() as cursor:
         cursor.execute("""
             INSERT INTO active_trackings 
             (chat_id, from_station, to_station, date, passengers, train_time, 
-             heartbeat_enabled, heartbeat_interval)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             heartbeat_enabled, heartbeat_interval, unique_token, is_stopped, last_request_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
         """, (chat_id, from_station, to_station, date, passengers, train_time,
-              1 if heartbeat_enabled else 0, heartbeat_interval))
+              1 if heartbeat_enabled else 0, heartbeat_interval, unique_token))
         return cursor.lastrowid
 
 def remove_tracking_from_db(chat_id: int, train_time: str = None, tracking_id: int = None):
@@ -366,8 +373,17 @@ def get_user_trackings(chat_id: int) -> List[sqlite3.Row]:
         return cursor.fetchall()
 
 def update_tracking_status(chat_id: int, train_time: str, seats_available: int, 
-                           train_num: str = None, requests_count: int = None):
-    """Обновляет статус трекинга в базе данных"""
+                           train_num: str = None, requests_count: int = None,
+                           tracking_id: int = None):
+    """
+    Обновляет статус трекинга в базе данных.
+    
+    Best practices:
+    - Поддержка обновления по tracking_id для точной идентификации
+    - Сохранение last_request_count при обновлении requests_count
+    
+    :param tracking_id: Уникальный ID трекинга (приоритетный параметр)
+    """
     with get_db_cursor() as cursor:
         updates = []
         params = []
@@ -383,10 +399,20 @@ def update_tracking_status(chat_id: int, train_time: str, seats_available: int,
         if requests_count is not None:
             updates.append("requests_count = ?")
             params.append(requests_count)
+            # Также сохраняем в last_request_count для истории
+            updates.append("last_request_count = ?")
+            params.append(requests_count)
         
         if updates:
-            params.extend([chat_id, train_time])
-            query = f"UPDATE active_trackings SET {', '.join(updates)} WHERE chat_id = ? AND train_time = ?"
+            if tracking_id:
+                # Обновляем по уникальному ID (наиболее точный способ)
+                params.append(tracking_id)
+                query = f"UPDATE active_trackings SET {', '.join(updates)} WHERE id = ?"
+            else:
+                # Fallback для старых записей без tracking_id
+                params.extend([chat_id, train_time])
+                query = f"UPDATE active_trackings SET {', '.join(updates)} WHERE chat_id = ? AND train_time = ?"
+            
             cursor.execute(query, params)
 
 def save_search_history(chat_id: int, from_station: str, to_station: str, 
@@ -826,12 +852,14 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time, trac
             tracking_status[tracking_key]['seats_available'] = max_seats
             
             # Обновляем статус в базе данных с текущим счетчиком запросов
+            # Передаем tracking_id для точной идентификации записи
             update_tracking_status(
                 chat_id, 
                 selected_time, 
                 tracking_status[tracking_key]['seats_available'],
                 tracking_status[tracking_key]['train_num'],
-                tracking_status[tracking_key]['requests_count']
+                tracking_status[tracking_key]['requests_count'],
+                tracking_id=tracking_id  # Передаем tracking_id для точного обновления
             )
 
             suitable = [
@@ -852,7 +880,8 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time, trac
                 tracking_status.pop(tracking_key, None)
                 
                 # Удаляем из базы данных после успешного завершения
-                remove_tracking_from_db(chat_id, selected_time)
+                # Используем tracking_id для точного удаления конкретной записи
+                remove_tracking_from_db(chat_id, selected_time, tracking_id=tracking_id)
                 
                 log_action(fake_msg, "TRACKING_SUCCESS", f"Train: {current_train['num']} ({selected_time}), Seats found")
                 return
@@ -874,8 +903,8 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time, trac
     heartbeat_intervals.pop(tracking_key, None)
     tracking_status.pop(tracking_key, None)
     
-    # Подтверждаем остановку в системе синхронизации
-    confirm_tracking_stopped(chat_id, selected_time)
+    # Подтверждаем остановку в системе синхронизации с передачей tracking_id
+    confirm_tracking_stopped(chat_id, selected_time, tracking_id=tracking_id)
     
     log_action(fake_msg, "TRACKING_STOPPED", f"Train: {selected_time}, Graceful shutdown completed")
 
@@ -1100,7 +1129,8 @@ def stop_tracking_cmd(message):
         
         for i, tracking in enumerate(trackings, 1):
             btn_text = f"❌ {tracking['from_station']} → {tracking['to_station']} ({tracking['train_time']})"
-            callback_data = f"stop_tracking_{tracking['train_time']}"
+            # Используем tracking_id для точной идентификации трекинга
+            callback_data = f"stop_tracking_{tracking['id']}"
             keyboard.add(InlineKeyboardButton(btn_text[:50], callback_data=callback_data))
         
         keyboard.add(InlineKeyboardButton("⛔ Остановить ВСЕ", callback_data="stop_all_trackings"))
@@ -1148,11 +1178,26 @@ def on_stop_tracking_choice(call):
         bot.send_message(chat_id, "⏹ Все трекинги остановлены.")
         return
 
-    # Останавливаем конкретный трекинг
-    train_time = call.data.replace("stop_tracking_", "")
-    tracking_key = make_tracking_key(chat_id, train_time)
+    # Останавливаем конкретный трекинг по ID
+    try:
+        tracking_id = int(call.data.replace("stop_tracking_", ""))
+    except ValueError:
+        bot.answer_callback_query(call.id, "❌ Ошибка: некорректный ID трекинга", show_alert=True)
+        return
     
-    remove_tracking_from_db(chat_id, train_time)
+    # Получаем информацию о трекинге из БД для корректной очистки
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT train_time FROM active_trackings WHERE id = ? AND chat_id = ?", (tracking_id, chat_id))
+        row = cursor.fetchone()
+        if not row:
+            bot.answer_callback_query(call.id, "⚠️ Трекинг не найден или уже удален", show_alert=True)
+            return
+        train_time = row['train_time']
+    
+    tracking_key = make_tracking_key(chat_id, train_time, tracking_id)
+    
+    # Удаляем из базы данных по уникальному ID
+    remove_tracking_from_db(chat_id, train_time, tracking_id=tracking_id)
     
     # Очищаем in-memory данные
     if tracking_key in active_jobs:
@@ -1166,7 +1211,7 @@ def on_stop_tracking_choice(call):
     user_steps.pop(chat_id, None)
     
     bot.answer_callback_query(call.id, "✅ Трекинг остановлен")
-    bot.send_message(chat_id, f"⏹ Трекинг на {train_time} остановлен.")
+    bot.send_message(chat_id, f"⏹ Трекинг #{tracking_id} ({train_time}) остановлен.")
 
 
 # Обработчик календаря для выбора даты
