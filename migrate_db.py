@@ -98,11 +98,20 @@ def migrate_active_trackings():
         # Добавляем updated_at если нет
         if 'updated_at' not in columns:
             print("  ➕ Добавление колонки updated_at...")
+            # SQLite не позволяет добавлять колонки с non-constant default
+            # Поэтому добавляем без default, затем обновляем записи
             cursor.execute("""
                 ALTER TABLE active_trackings 
-                ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ADD COLUMN updated_at TIMESTAMP
             """)
-            print("    ✓ Колонка updated_at добавлена")
+            
+            # Обновляем существующие записи значением created_at
+            cursor.execute("""
+                UPDATE active_trackings 
+                SET updated_at = created_at
+                WHERE updated_at IS NULL
+            """)
+            print("    ✓ Колонка updated_at добавлена и инициализирована")
         
         # Создаем индекс на unique_token
         cursor.execute("""
