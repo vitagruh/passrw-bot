@@ -98,11 +98,20 @@ def migrate_active_trackings():
         # Добавляем updated_at если нет
         if 'updated_at' not in columns:
             print("  ➕ Добавление колонки updated_at...")
+            # SQLite не позволяет добавлять колонки с non-constant default
+            # Поэтому добавляем без default, затем обновляем записи
             cursor.execute("""
                 ALTER TABLE active_trackings 
-                ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ADD COLUMN updated_at TIMESTAMP
             """)
-            print("    ✓ Колонка updated_at добавлена")
+            
+            # Обновляем существующие записи значением created_at
+            cursor.execute("""
+                UPDATE active_trackings 
+                SET updated_at = created_at
+                WHERE updated_at IS NULL
+            """)
+            print("    ✓ Колонка updated_at добавлена и инициализирована")
         
         # Создаем индекс на unique_token
         cursor.execute("""
@@ -138,56 +147,86 @@ def create_history_table():
     - reason: причина остановки (user_stop, admin_stop, timeout, success)
     - stopped_at: время остановки
     """
-    print("\n🔄 Создание таблицы request_counter_history...")
+    print("\n🔄 Создание/проверка таблицы request_counter_history...")
     
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
+        # Проверяем существует ли таблица
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS request_counter_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tracking_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                from_station TEXT NOT NULL,
-                to_station TEXT NOT NULL,
-                train_time TEXT NOT NULL,
-                train_num TEXT,
-                final_requests_count INTEGER DEFAULT 0,
-                last_request_count INTEGER DEFAULT 0,
-                seats_found INTEGER DEFAULT 0,
-                reason TEXT NOT NULL CHECK(reason IN (
-                    'user_stop', 
-                    'admin_stop', 
-                    'timeout', 
-                    'success', 
-                    'error',
-                    'force_stop'
-                )),
-                unique_token TEXT,
-                created_at TIMESTAMP,
-                stopped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (tracking_id) REFERENCES active_trackings(id) ON DELETE SET NULL
-            )
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='request_counter_history'
         """)
         
-        # Индексы для быстрого поиска
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_history_chat 
-            ON request_counter_history(chat_id, stopped_at)
-        """)
-        
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_history_reason 
-            ON request_counter_history(reason, stopped_at)
-        """)
+        if cursor.fetchone():
+            print("  ℹ️ Таблица request_counter_history уже существует")
+            
+            # Проверяем наличие всех необходимых колонок
+            cursor.execute("PRAGMA table_info(request_counter_history)")
+            columns = {row['name'] for row in cursor.fetchall()}
+            
+            required_columns = {
+                'tracking_id', 'chat_id', 'from_station', 'to_station',
+                'train_time', 'train_num', 'final_requests_count',
+                'last_request_count', 'seats_found', 'reason',
+                'unique_token', 'created_at', 'stopped_at'
+            }
+            
+            missing = required_columns - columns
+            if missing:
+                print(f"  ⚠️ Отсутствуют колонки: {missing}")
+                print("  → Таблица требует ручного обновления или пересоздания")
+            else:
+                print("  ✅ Все колонки на месте")
+        else:
+            # Таблицы нет, создаем
+            print("  ➕ Создание таблицы request_counter_history...")
+            cursor.execute("""
+                CREATE TABLE request_counter_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tracking_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    from_station TEXT NOT NULL,
+                    to_station TEXT NOT NULL,
+                    train_time TEXT NOT NULL,
+                    train_num TEXT,
+                    final_requests_count INTEGER DEFAULT 0,
+                    last_request_count INTEGER DEFAULT 0,
+                    seats_found INTEGER DEFAULT 0,
+                    reason TEXT NOT NULL CHECK(reason IN (
+                        'user_stop', 
+                        'admin_stop', 
+                        'timeout', 
+                        'success', 
+                        'error',
+                        'force_stop'
+                    )),
+                    unique_token TEXT,
+                    created_at TIMESTAMP,
+                    stopped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (tracking_id) REFERENCES active_trackings(id) ON DELETE SET NULL
+                )
+            """)
+            
+            # Индексы для быстрого поиска
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_history_chat 
+                ON request_counter_history(chat_id, stopped_at)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_history_reason 
+                ON request_counter_history(reason, stopped_at)
+            """)
+            
+            print("  ✅ Таблица request_counter_history создана")
         
         conn.commit()
-        print("✅ Таблица request_counter_history создана")
         
     except Exception as e:
         conn.rollback()
-        print(f"❌ Ошибка создания таблицы истории: {e}")
+        print(f"❌ Ошибка работы с таблицей истории: {e}")
         raise
     finally:
         conn.close()
