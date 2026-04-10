@@ -324,15 +324,23 @@ def save_tracking_to_db(chat_id: int, from_station: str, to_station: str,
         """, (chat_id, from_station, to_station, date, passengers, train_time,
               1 if heartbeat_enabled else 0, heartbeat_interval))
 
-def remove_tracking_from_db(chat_id: int, train_time: str = None):
-    """Удаляет трекинг из базы данных"""
+def remove_tracking_from_db(chat_id: int, tracking_id: int = None, train_time: str = None):
+    """Удаляет трекинг из базы данных по ID или train_time"""
     with get_db_cursor() as cursor:
-        if train_time:
+        if tracking_id:
+            # Удаляем по уникальному ID (предпочтительный способ)
+            cursor.execute("""
+                DELETE FROM active_trackings 
+                WHERE id = ? AND chat_id = ?
+            """, (tracking_id, chat_id))
+        elif train_time:
+            # Удаляем по train_time (для обратной совместимости)
             cursor.execute("""
                 DELETE FROM active_trackings 
                 WHERE chat_id = ? AND train_time = ?
             """, (chat_id, train_time))
         else:
+            # Удаляем все трекинги пользователя
             cursor.execute("""
                 DELETE FROM active_trackings 
                 WHERE chat_id = ?
@@ -452,14 +460,22 @@ def restore_active_trackings(bot_instance):
             daemon=True
         )
         thread.start()
-        active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
         
         # Восстанавливаем статус трекинга с сохранением счетчика запросов из БД
         tracking_status[chat_id] = {
+            'id': tracking['id'],  # Сохраняем ID для корректного удаления
             'train_num': tracking['train_num'],
             'train_time': tracking['train_time'],
             'seats_available': tracking['seats_available'],
             'requests_count': tracking['requests_count'] if tracking['requests_count'] else 0
+        }
+        
+        # Также сохраняем id в active_jobs для корректной остановки
+        active_jobs[chat_id] = {
+            'thread': thread, 
+            'stop_flag': False,
+            'id': tracking['id'],
+            'train_time': tracking['train_time']
         }
         
         restored_count += 1
@@ -684,19 +700,22 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
     # Получаем интервал heartbeat для этого пользователя (по умолчанию 1800 сек = 30 мин)
     hb_interval = heartbeat_intervals.get(chat_id, 1800)
     
-    # Загружаем текущий requests_count из базы данных (если трекинг уже существовал)
+    # Загружаем текущий requests_count и ID из базы данных (если трекинг уже существовал)
     existing_tracking = None
+    tracking_id = None
     with get_db_cursor() as cursor:
         cursor.execute("""
-            SELECT requests_count FROM active_trackings 
+            SELECT id, requests_count FROM active_trackings 
             WHERE chat_id = ? AND train_time = ?
         """, (chat_id, selected_time))
         row = cursor.fetchone()
         if row:
             existing_tracking = row['requests_count']
+            tracking_id = row['id']
     
     # Инициализация статуса отслеживания для пользователя
     tracking_status[chat_id] = {
+        'id': tracking_id,  # Сохраняем ID для корректного удаления
         'train_num': None,
         'train_time': selected_time,
         'seats_available': 0,
@@ -747,7 +766,7 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                             max_seats = seats
                 tracking_status[chat_id]['seats_available'] = max_seats
             
-            # Обновляем статус в базе данных
+            # Обновляем статус в базе данных (с использованием ID для точного обновления)
             update_tracking_status(
                 chat_id, 
                 selected_time, 
@@ -935,11 +954,11 @@ def show_my_trackings(message):
         text += f"   💓 Heartbeat: {'вкл' if tracking['heartbeat_enabled'] else 'выкл'}\n"
         text += f"   🔁 Запросов: {tracking['requests_count']}\n\n"
     
-    # Добавляем кнопки для удаления трекингов
+    # Добавляем кнопки для удаления трекингов (используем ID для точного удаления)
     keyboard = InlineKeyboardMarkup(row_width=1)
     for i, tracking in enumerate(trackings, 1):
         btn_text = f"❌ Удалить: {tracking['from_station']} → {tracking['to_station']} ({tracking['train_time']})"
-        callback_data = f"delete_tracking_{tracking['train_time']}"
+        callback_data = f"delete_tracking_{tracking['id']}"
         # Обрезаем callback_data до 64 символов (лимит Telegram)
         if len(callback_data) > 64:
             callback_data = callback_data[:64]
@@ -1069,25 +1088,35 @@ def on_stop_tracking_choice(call):
         bot.send_message(chat_id, "⏹ Все трекинги остановлены.")
         return
     
-    # Обработка удаления трекинга через /mytracks
+    # Обработка удаления трекинга через /mytracks (используем ID)
     if call.data.startswith("delete_tracking_"):
-        train_time = call.data.replace("delete_tracking_", "")
-        remove_tracking_from_db(chat_id, train_time)
+        tracking_id = int(call.data.replace("delete_tracking_", ""))
+        remove_tracking_from_db(chat_id, tracking_id=tracking_id)
+        
+        # Получаем информацию о трекинге для сообщения
+        trackings = get_user_trackings(chat_id)
+        deleted_train_time = None
+        for t in trackings:
+            if t['id'] == tracking_id:
+                deleted_train_time = t['train_time']
+                break
         
         # Очищаем in-memory данные если этот трекинг активен
         if chat_id in active_jobs:
             job = active_jobs[chat_id]
-            if job.get('train_time') == train_time:
+            if job.get('id') == tracking_id or (deleted_train_time and job.get('train_time') == deleted_train_time):
                 job['stop_flag'] = True
                 active_jobs.pop(chat_id)
         
-        if chat_id in tracking_status and tracking_status[chat_id].get('train_time') == train_time:
-            tracking_status.pop(chat_id, None)
+        if chat_id in tracking_status:
+            status = tracking_status[chat_id]
+            if status.get('id') == tracking_id or (deleted_train_time and status.get('train_time') == deleted_train_time):
+                tracking_status.pop(chat_id, None)
         heartbeat_enabled.discard(chat_id)
         heartbeat_intervals.pop(chat_id, None)
         
         bot.answer_callback_query(call.id, "✅ Трекинг удален")
-        bot.send_message(chat_id, f"✅ Трекинг на {train_time} удален.")
+        bot.send_message(chat_id, f"✅ Трекинг (ID: {tracking_id}) удален.")
         return
     
     # Останавливаем конкретный трекинг (старый функционал через /stop)
@@ -1507,7 +1536,24 @@ def on_heartbeat_choice(call):
             daemon=True
         )
         thread.start()
-        active_jobs[chat_id] = {'thread': thread, 'stop_flag': False}
+        
+        # Получаем ID только что созданного трекинга из БД
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                SELECT id FROM active_trackings 
+                WHERE chat_id = ? AND train_time = ?
+                ORDER BY created_at DESC LIMIT 1
+            """, (chat_id, sel_time))
+            row = cursor.fetchone()
+            tracking_id = row['id'] if row else None
+        
+        # Сохраняем ID в active_jobs для корректного удаления
+        active_jobs[chat_id] = {
+            'thread': thread, 
+            'stop_flag': False,
+            'id': tracking_id,
+            'train_time': sel_time
+        }
         
         hb_status = "включен" if chat_id in heartbeat_enabled else "выключен"
         logger.info(f"✅ Мониторинг активирован: Пользователь {chat_id} -> Поезд №{sel_num} ({sel_time}) | heartbeat={hb_status}")
