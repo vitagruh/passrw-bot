@@ -87,51 +87,83 @@ def create_sync_table():
     logger.info("✅ Таблица синхронизации создана")
 
 
-def request_tracking_stop(chat_id: int, train_time: str, admin_username: str = None) -> bool:
+def request_tracking_stop(chat_id: int, train_time: str = None, admin_username: str = None, tracking_id: int = None) -> bool:
     """
     Запрашивает остановку трекинга.
     
     Архитектурное решение:
-    - Вместо прямого удаления из БД сначала устанавливаем флаг остановки
-    - Бот проверяет флаги в каждом цикле и корректно завершает поток
-    - Только после подтверждения от бота запись удаляется из БД
+    - Вместо прямого удаления из БД сначала устанавливаем флаг is_stopped=1
+    - Бот проверяет флаг в каждом цикле и корректно завершает поток
+    - Поток выполняет финальное сохранение статистики и вызывает confirm_tracking_stopped()
+    - confirm_tracking_stopped() записывает историю и удаляет запись из БД
     
     :param chat_id: ID чата пользователя
-    :param train_time: Время отправления поезда (ключ трекинга)
+    :param train_time: Время отправления поезда (ключ трекинга, опционально)
     :param admin_username: Имя администратора (для аудита)
+    :param tracking_id: Уникальный ID трекинга (приоритет над train_time)
     :return: True если запрос успешно создан
     """
     try:
         with get_db_cursor() as cursor:
-            # Проверяем существует ли трекинг
-            cursor.execute("""
-                SELECT id FROM active_trackings 
-                WHERE chat_id = ? AND train_time = ?
-            """, (chat_id, train_time))
-            
-            if not cursor.fetchone():
-                logger.warning(f"Трекинг {chat_id}:{train_time} не найден в БД")
+            # Определяем трекинг для остановки
+            if tracking_id:
+                # Поиск по уникальному ID
+                cursor.execute("""
+                    SELECT id, chat_id, train_time, requests_count, last_request_count,
+                           from_station, to_station, train_num, unique_token, created_at
+                    FROM active_trackings 
+                    WHERE id = ?
+                """, (tracking_id,))
+            elif train_time:
+                # Поиск по chat_id + train_time (старый метод)
+                cursor.execute("""
+                    SELECT id, chat_id, train_time, requests_count, last_request_count,
+                           from_station, to_station, train_num, unique_token, created_at
+                    FROM active_trackings 
+                    WHERE chat_id = ? AND train_time = ?
+                """, (chat_id, train_time))
+            else:
+                logger.error("request_tracking_stop: требуется tracking_id или train_time")
                 return False
             
-            # Создаем флаг остановки
+            tracking = cursor.fetchone()
+            
+            if not tracking:
+                logger.warning(f"Трекинг не найден: tracking_id={tracking_id}, chat_id={chat_id}, train_time={train_time}")
+                return False
+            
+            # Извлекаем данные трекинга
+            actual_tracking_id = tracking['id']
+            actual_chat_id = tracking['chat_id']
+            actual_train_time = tracking['train_time']
+            
+            # Устанавливаем флаг is_stopped=1 в БД (graceful shutdown)
             cursor.execute("""
-                INSERT INTO sync_flags (chat_id, train_time, action, created_at)
-                VALUES (?, ?, 'STOP', CURRENT_TIMESTAMP)
-            """, (chat_id, train_time))
+                UPDATE active_trackings 
+                SET is_stopped = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (actual_tracking_id,))
+            
+            # Создаем запись в sync_flags для уведомления бота
+            cursor.execute("""
+                INSERT INTO sync_flags (chat_id, train_time, action, tracking_id, admin_username, created_at)
+                VALUES (?, ?, 'STOP', ?, ?, CURRENT_TIMESTAMP)
+            """, (actual_chat_id, actual_train_time, actual_tracking_id, admin_username))
             
             # Создаем файл-уведомление для мгновенной реакции бота
-            flag_file = SYNC_DIR / f"stop_{chat_id}_{train_time.replace(':', '-')}.flag"
+            flag_file = SYNC_DIR / f"stop_{actual_chat_id}_{actual_train_time.replace(':', '-')}.flag"
             flag_file.write_text(json.dumps({
-                'chat_id': chat_id,
-                'train_time': train_time,
+                'chat_id': actual_chat_id,
+                'train_time': actual_train_time,
+                'tracking_id': actual_tracking_id,
                 'action': 'STOP',
                 'admin': admin_username,
                 'timestamp': datetime.now().isoformat()
             }))
             
             logger.info(
-                f"🛑 Запрошена остановка трекинга: chat_id={chat_id}, "
-                f"train_time={train_time}, admin={admin_username}"
+                f"🛑 Запрошена остановка трекинга: tracking_id={actual_tracking_id}, "
+                f"chat_id={actual_chat_id}, train_time={actual_train_time}, admin={admin_username}"
             )
             return True
             
@@ -140,25 +172,92 @@ def request_tracking_stop(chat_id: int, train_time: str, admin_username: str = N
         return False
 
 
-def confirm_tracking_stopped(chat_id: int, train_time: str) -> bool:
+def confirm_tracking_stopped(chat_id: int, train_time: str = None, tracking_id: int = None, reason: str = 'user_stop') -> bool:
     """
     Подтверждает остановку трекинга после завершения потока.
     
+    Архитектурное решение:
+    - Записывает финальную статистику в request_counter_history
+    - Удаляет запись из active_trackings
+    - Отмечает флаги синхронизации как обработанные
+    - Удаляет файлы-флаги
+    
     :param chat_id: ID чата пользователя
-    :param train_time: Время отправления поезда
+    :param train_time: Время отправления поезда (опционально, если есть tracking_id)
+    :param tracking_id: Уникальный ID трекинга (приоритет над train_time)
+    :param reason: Причина остановки (user_stop, admin_stop, success, timeout, error)
     :return: True если подтверждение успешно записано
     """
     try:
         with get_db_cursor() as cursor:
+            # Определяем трекинг для остановки
+            if tracking_id:
+                cursor.execute("""
+                    SELECT id, chat_id, train_time, requests_count, last_request_count,
+                           from_station, to_station, train_num, seats_available, 
+                           unique_token, created_at
+                    FROM active_trackings 
+                    WHERE id = ?
+                """, (tracking_id,))
+            elif train_time:
+                cursor.execute("""
+                    SELECT id, chat_id, train_time, requests_count, last_request_count,
+                           from_station, to_station, train_num, seats_available,
+                           unique_token, created_at
+                    FROM active_trackings 
+                    WHERE chat_id = ? AND train_time = ?
+                """, (chat_id, train_time))
+            else:
+                logger.error("confirm_tracking_stopped: требуется tracking_id или train_time")
+                return False
+            
+            tracking = cursor.fetchone()
+            
+            if not tracking:
+                logger.warning(f"Трекинг не найден для подтверждения остановки: tracking_id={tracking_id}, chat_id={chat_id}")
+                return False
+            
+            # Извлекаем данные трекинга
+            actual_tracking_id = tracking['id']
+            actual_chat_id = tracking['chat_id']
+            actual_train_time = tracking['train_time']
+            
+            # Записываем историю перед удалением (сохраняем счетчики)
+            cursor.execute("""
+                INSERT INTO request_counter_history 
+                (tracking_id, chat_id, from_station, to_station, train_time, train_num,
+                 final_requests_count, last_request_count, seats_found, reason, 
+                 unique_token, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                actual_tracking_id,
+                actual_chat_id,
+                tracking['from_station'],
+                tracking['to_station'],
+                actual_train_time,
+                tracking['train_num'],
+                tracking['requests_count'],
+                tracking['last_request_count'],
+                tracking['seats_available'],
+                reason,
+                tracking['unique_token'],
+                tracking['created_at']
+            ))
+            
+            logger.info(
+                f"📝 Сохранена история трекинга: tracking_id={actual_tracking_id}, "
+                f"requests={tracking['requests_count']}, reason={reason}"
+            )
+            
             # Отмечаем все флаги STOP как обработанные
             cursor.execute("""
                 UPDATE sync_flags 
                 SET processed = 1, processed_at = CURRENT_TIMESTAMP
                 WHERE chat_id = ? AND train_time = ? AND action = 'STOP' AND processed = 0
-            """, (chat_id, train_time))
+            """, (actual_chat_id, actual_train_time))
             
             # Удаляем файл-флаг
-            flag_files = list(SYNC_DIR.glob(f"stop_{chat_id}_{train_time.replace(':', '-')}*.flag"))
+            flag_files = list(SYNC_DIR.glob(f"stop_{actual_chat_id}_{actual_train_time.replace(':', '-')}*.flag"))
             for flag_file in flag_files:
                 try:
                     flag_file.unlink()
@@ -168,10 +267,11 @@ def confirm_tracking_stopped(chat_id: int, train_time: str) -> bool:
             # Теперь удаляем сам трекинг из БД
             cursor.execute("""
                 DELETE FROM active_trackings 
-                WHERE chat_id = ? AND train_time = ?
-            """, (chat_id, train_time))
+                WHERE id = ?
+            """, (actual_tracking_id,))
             
-            logger.info(f"✅ Трекинг {chat_id}:{train_time} остановлен и удален из БД")
+            deleted_count = cursor.rowcount
+            logger.info(f"✅ Трекинг {actual_chat_id}:{actual_train_time} (ID={actual_tracking_id}) остановлен и удален из БД (удалено строк: {deleted_count})")
             return True
             
     except Exception as e:
