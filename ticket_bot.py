@@ -684,12 +684,23 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
     # Получаем интервал heartbeat для этого пользователя (по умолчанию 1800 сек = 30 мин)
     hb_interval = heartbeat_intervals.get(chat_id, 1800)
     
+    # Загружаем текущий requests_count из базы данных (если трекинг уже существовал)
+    existing_tracking = None
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT requests_count FROM active_trackings 
+            WHERE chat_id = ? AND train_time = ?
+        """, (chat_id, selected_time))
+        row = cursor.fetchone()
+        if row:
+            existing_tracking = row['requests_count']
+    
     # Инициализация статуса отслеживания для пользователя
     tracking_status[chat_id] = {
         'train_num': None,
         'train_time': selected_time,
         'seats_available': 0,
-        'requests_count': 0
+        'requests_count': existing_tracking if existing_tracking is not None else 0
     }
 
     while chat_id in active_jobs:
@@ -924,7 +935,16 @@ def show_my_trackings(message):
         text += f"   💓 Heartbeat: {'вкл' if tracking['heartbeat_enabled'] else 'выкл'}\n"
         text += f"   🔁 Запросов: {tracking['requests_count']}\n\n"
     
-    keyboard = InlineKeyboardMarkup()
+    # Добавляем кнопки для удаления трекингов
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    for i, tracking in enumerate(trackings, 1):
+        btn_text = f"❌ Удалить: {tracking['from_station']} → {tracking['to_station']} ({tracking['train_time']})"
+        callback_data = f"delete_tracking_{tracking['train_time']}"
+        # Обрезаем callback_data до 64 символов (лимит Telegram)
+        if len(callback_data) > 64:
+            callback_data = callback_data[:64]
+        keyboard.add(InlineKeyboardButton(btn_text[:50], callback_data=callback_data))
+    
     keyboard.add(InlineKeyboardButton("🔙 Назад к списку", callback_data="back_to_list"))
     
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
@@ -1029,9 +1049,9 @@ def stop_tracking_cmd(message):
         bot.reply_to(message, "⏹ Отслеживание остановлено.")
         user_steps.pop(chat_id, None)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("stop_tracking_") or call.data == "stop_all_trackings")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("stop_tracking_") or call.data == "stop_all_trackings" or call.data.startswith("delete_tracking_"))
 def on_stop_tracking_choice(call):
-    """Обработчик выбора трекинга для остановки"""
+    """Обработчик выбора трекинга для остановки/удаления"""
     chat_id = call.message.chat.id
     
     if call.data == "stop_all_trackings":
@@ -1048,8 +1068,29 @@ def on_stop_tracking_choice(call):
         bot.answer_callback_query(call.id, "✅ Все трекинги остановлены")
         bot.send_message(chat_id, "⏹ Все трекинги остановлены.")
         return
-
-    # Останавливаем конкретный трекинг
+    
+    # Обработка удаления трекинга через /mytracks
+    if call.data.startswith("delete_tracking_"):
+        train_time = call.data.replace("delete_tracking_", "")
+        remove_tracking_from_db(chat_id, train_time)
+        
+        # Очищаем in-memory данные если этот трекинг активен
+        if chat_id in active_jobs:
+            job = active_jobs[chat_id]
+            if job.get('train_time') == train_time:
+                job['stop_flag'] = True
+                active_jobs.pop(chat_id)
+        
+        if chat_id in tracking_status and tracking_status[chat_id].get('train_time') == train_time:
+            tracking_status.pop(chat_id, None)
+        heartbeat_enabled.discard(chat_id)
+        heartbeat_intervals.pop(chat_id, None)
+        
+        bot.answer_callback_query(call.id, "✅ Трекинг удален")
+        bot.send_message(chat_id, f"✅ Трекинг на {train_time} удален.")
+        return
+    
+    # Останавливаем конкретный трекинг (старый функционал через /stop)
     train_time = call.data.replace("stop_tracking_", "")
     remove_tracking_from_db(chat_id, train_time)
     
