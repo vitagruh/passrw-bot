@@ -158,7 +158,7 @@ def get_tracking_by_id(tracking_id: int) -> Optional[sqlite3.Row]:
         return cursor.fetchone()
 
 
-def delete_tracking(tracking_id: int) -> bool:
+def delete_tracking_db(tracking_id: int) -> bool:
     """Удалить трекинг по ID"""
     with get_db_cursor() as cursor:
         cursor.execute("DELETE FROM active_trackings WHERE id = ?", (tracking_id,))
@@ -991,11 +991,11 @@ def delete_tracking(tracking_id):
     """Удаление трекинга"""
     tracking = get_tracking_by_id(tracking_id)
     if tracking:
-        if delete_tracking(tracking_id):
+        if delete_tracking_db(tracking_id):
             log_admin_action(
                 session['admin_username'], 
                 'DELETE_TRACKING', 
-                f'Удален трекинг #{tracking_id} для пользователя {tracking.chat_id}'
+                f'Удален трекинг #{tracking_id} для пользователя {tracking["chat_id"]}'
             )
             flash('✅ Трекинг удален', 'success')
         else:
