@@ -105,6 +105,63 @@ def setup_logger(name: str = 'TicketBot') -> logging.Logger:
 logger = setup_logger('TicketBot')
 
 
+def get_user_profile_info(message) -> str:
+    """
+    Формирует строку с информацией о пользователе для логирования.
+    
+    Примечание по безопасности и архитектуре:
+    - При использовании polling (bot.polling()) мы НЕ имеем доступа к реальному IP клиента.
+      Запросы идут от серверов Telegram, поэтому IP в логах будет принадлежать Telegram.
+    - Для получения реального IP необходимо использовать Webhook режим и анализировать 
+      заголовки X-Forwarded-For, но это требует настройки HTTPS и reverse-proxy (nginx).
+    - Мы логируем доступные данные профиля: ID, Username, Имя, Язык.
+    """
+    if not message or not message.from_user:
+        return "Unknown User"
+    
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "NoUsername"
+    full_name = user.full_name.replace('|', ' ')  # Экранируем разделитель
+    lang = user.language_code or "unknown"
+    
+    # Формат: ID[12345] User[@name] Name[Ivan] Lang[ru]
+    return f"ID[{user.id}] User[{username}] Name[{full_name}] Lang[{lang}]"
+
+
+def log_action(message, action: str, details: str = ""):
+    """
+    Единая функция логирования действий пользователя с расширенной информацией.
+    
+    :param message: Объект сообщения или callback query
+    :param action: Тип действия (START, SEARCH, ERROR, XSS_ATTEMPT и т.д.)
+    :param details: Дополнительные детали (маршрут, дата, ошибка)
+    """
+    # Обработка CallbackQuery (для кнопок календаря и inline кнопок)
+    if hasattr(message, 'message') and hasattr(message, 'data'):
+        # Это CallbackQuery
+        user_info = get_user_profile_info(message.message)
+        chat_id = message.message.chat.id
+    else:
+        # Обычное сообщение
+        user_info = get_user_profile_info(message)
+        chat_id = message.chat.id if hasattr(message, 'chat') else "Unknown"
+
+    # Проверка на потенциальные XSS атаки в деталях
+    is_security_threat = False
+    if details and any(tag in details.lower() for tag in ['<script', 'javascript:', 'onerror=', 'onclick=']):
+        is_security_threat = True
+        action = "SECURITY_XSS_ATTEMPT"
+    
+    log_entry = f"{user_info} | Action[{action}] | Details[{details}]"
+    
+    if is_security_threat:
+        logger.warning(f"🚨 {log_entry}")
+    elif action.startswith("ERROR") or action == "CRITICAL":
+        logger.error(f"❌ {log_entry}")
+    else:
+        logger.info(f"ℹ️ {log_entry}")
+
+
 def log_exception(logger_instance: logging.Logger, message: str = "Произошла ошибка"):
     """
     Вспомогательная функция для логирования исключений с полным traceback.
@@ -371,6 +428,14 @@ def restore_active_trackings(bot_instance):
             heartbeat_intervals[chat_id] = tracking['heartbeat_interval']
         
         # Запускаем поток трекинга
+        log_message = f"From: {tracking['from_station']}, To: {tracking['to_station']}, Date: {tracking['date']}, Train: {tracking['train_time']}"
+        # Создаем фейковый объект message для логирования (так как восстановление происходит без сообщения)
+        class FakeMessage:
+            from_user = type('User', (), {'id': chat_id, 'username': None, 'full_name': 'RestoredTrack', 'language_code': 'unknown', 'is_bot': False})()
+            chat = type('Chat', (), {'id': chat_id})()
+        fake_msg = FakeMessage()
+        log_action(fake_msg, "TRACKING_RESTORED", log_message)
+        
         thread = threading.Thread(
             target=tracking_worker,
             args=(chat_id, tracking['from_station'], tracking['to_station'], 
@@ -593,7 +658,14 @@ def parse_carriage_info(status_cell):
 # --- ФУНКЦИИ ОТСЛЕЖИВАНИЯ ---
 
 def tracking_worker(chat_id, from_station, to_station, date, selected_time):
-    logger.info(f"🔄 Запуск трекинга: {chat_id} | Поезд: {selected_time} | Маршрут: {from_station} → {to_station}")
+    # Создаем фейковый объект message для логирования внутри потока
+    class FakeMessage:
+        from_user = type('User', (), {'id': chat_id, 'username': None, 'full_name': 'TrackingWorker', 'language_code': 'unknown', 'is_bot': False})()
+        chat = type('Chat', (), {'id': chat_id})()
+    fake_msg = FakeMessage()
+    
+    log_action(fake_msg, "TRACKING_STARTED", f"From: {from_station}, To: {to_station}, Date: {date}, Train: {selected_time}")
+    
     num_passengers = user_data[chat_id].get('passengers', 1)
     last_heartbeat = time.time()
     # Получаем интервал heartbeat для этого пользователя (по умолчанию 1800 сек = 30 мин)
@@ -615,7 +687,7 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
             
             # Отправка heartbeat сообщения если включено и прошел заданный интервал
             if chat_id in heartbeat_enabled and (time.time() - last_heartbeat) >= hb_interval:
-                logger.info(f"💓 Heartbeat для {chat_id} (интервал: {hb_interval} сек) | Поезд: {selected_time}")
+                log_action(fake_msg, "HEARTBEAT_SENT", f"Train: {selected_time}, Interval: {hb_interval}s")
                 bot.send_message(chat_id, "💓 Бот работает, проверяю билеты...")
                 last_heartbeat = time.time()
 
@@ -623,7 +695,7 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
             current_train = next((t for t in trains if t['time'] == selected_time), None)
 
             if not current_train:
-                logger.warning(f"Поезд {selected_time} не найден в списке для пользователя {chat_id}.")
+                log_action(fake_msg, "TRACKING_TRAIN_NOT_FOUND", f"Train: {selected_time} not found in results")
                 time.sleep(CHECK_INTERVAL)
                 continue
             
@@ -667,7 +739,7 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 # Удаляем из базы данных после успешного завершения
                 remove_tracking_from_db(chat_id, selected_time)
                 
-                logger.info(f"✅ Трекинг завершен успешно для {chat_id} | Поезд №{current_train['num']} ({selected_time})")
+                log_action(fake_msg, "TRACKING_SUCCESS", f"Train: {current_train['num']} ({selected_time}), Seats found")
                 return
 
             logger.debug(f"[{datetime.now().strftime('%H:%M')}] Нет мест для {chat_id} | Поезд: {selected_time}. Ждем...")
@@ -738,7 +810,7 @@ def send_welcome(message):
         "Нажми кнопку ниже или отправь /track чтобы начать!"
     )
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
-    logger.info(f"👋 Пользователь {chat_id} ({first_name}) запустил бота")
+    log_action(message, "START", f"User started bot. Name: {first_name}")
 
 @bot.message_handler(commands=['help'])
 def show_help(message):
@@ -789,7 +861,7 @@ def show_help(message):
     keyboard.add(InlineKeyboardButton("🚂 Начать поиск", callback_data="quick_start"))
     
     bot.send_message(chat_id, help_text, parse_mode="HTML", reply_markup=keyboard)
-    logger.info(f"📘 Пользователь {chat_id} запросил справку")
+    log_action(message, "HELP_REQUESTED", "User requested help documentation")
 
 @bot.message_handler(commands=['mytracks'])
 def show_my_trackings(message):
@@ -817,7 +889,7 @@ def show_my_trackings(message):
     keyboard.add(InlineKeyboardButton("🔙 Назад к списку", callback_data="back_to_list"))
     
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
-    logger.info(f"📊 Пользователь {chat_id} запросил список трекингов ({len(trackings)} шт.)")
+    log_action(message, "MYTRACKS_REQUESTED", f"User requested tracking list. Count: {len(trackings)}")
 
 @bot.message_handler(commands=['history'])
 def show_history(message):
@@ -849,7 +921,7 @@ def show_history(message):
         keyboard.add(InlineKeyboardButton(btn_text[:50], callback_data=callback_data))
     
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
-    logger.info(f"📜 Пользователь {chat_id} запросил историю поисков")
+    log_action(message, "HISTORY_REQUESTED", "User requested search history")
 
 @bot.message_handler(commands=['track'])
 def start_track(message):
@@ -910,7 +982,7 @@ def stop_tracking_cmd(message):
             parse_mode="HTML",
             reply_markup=keyboard
         )
-        logger.info(f"⏹ Пользователь {chat_id} запросил остановку трекинга ({len(trackings)} шт.)")
+        log_action(message, "STOP_REQUESTED", f"User requested to stop tracking. Count: {len(trackings)}")
     else:
         # Только in-memory трекинг (старый формат)
         active_jobs.pop(chat_id)
@@ -1136,7 +1208,7 @@ def handle_step_input(message):
         loading_msg = bot.send_message(chat_id, f"🔍 Ищу поезда по маршруту {user_data[chat_id]['from']} → {user_data[chat_id]['to']} на {user_data[chat_id]['date']}...")
         
         # Логирование поиска с номером пользователя и параметрами
-        logger.info(f"🎫 Поиск билетов для пользователя {chat_id}: {user_data[chat_id]['from']} → {user_data[chat_id]['to']} | Дата: {user_data[chat_id]['date']} | Пассажиров: {num_pax}")
+        log_action(message, "SEARCH_STARTED", f"From: {user_data[chat_id]['from']}, To: {user_data[chat_id]['to']}, Date: {user_data[chat_id]['date']}, Passengers: {num_pax}")
         trains = get_trains_list(user_data[chat_id]['from'], user_data[chat_id]['to'], user_data[chat_id]['date'], chat_id)
         
         bot.delete_message(chat_id, loading_msg.message_id)
