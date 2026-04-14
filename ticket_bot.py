@@ -285,6 +285,18 @@ def init_database():
             )
         """)
         
+        # Таблица истории поисков
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS search_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                from_station TEXT NOT NULL,
+                to_station TEXT NOT NULL,
+                search_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            )
+        """)
+        
         # Таблица статистики пользователей
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_statistics (
