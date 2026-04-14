@@ -1,19 +1,17 @@
 ```
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Logs
+*.log
+logs/
+
 # Database files
 *.db
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.venv/
-.ENV
-.ENV.local
+# Environment files
 .env
 .env.local
-.env.*
+*.env.*
 ```
