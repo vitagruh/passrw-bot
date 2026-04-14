@@ -1110,6 +1110,7 @@ def send_welcome(message):
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     keyboard.add(KeyboardButton("🚂 Начать поиск"))
     keyboard.add(KeyboardButton("📊 Мои трекинги"), KeyboardButton("📜 История"))
+    keyboard.add(KeyboardButton("⭐ Избранное"), KeyboardButton("📈 Моя статистика"))
     keyboard.add(KeyboardButton("❓ Помощь"))
     
     text = (
@@ -1119,13 +1120,17 @@ def send_welcome(message):
         "• 🔔 Уведомления при появлении мест\n"
         "• 📊 Отслеживание нескольких поездов одновременно\n"
         "• 💓 Heartbeat-сообщения о статусе проверки\n"
-        "• 📜 История ваших поисков\n\n"
+        "• 📜 История ваших поисков\n"
+        "• ⭐ Избранные маршруты для быстрого доступа\n"
+        "• 📈 Личная статистика использования\n\n"
         "<b>Команды:</b>\n"
         "/track - Начать поиск билетов\n"
         "/mytracks - Показать все активные трекинги\n"
         "/status - Статус текущего трекинга\n"
         "/stop - Остановить трекинг\n"
         "/history - История поисков\n"
+        "/favorites - ⭐ Избранные маршруты\n"
+        "/stats - 📈 Личная статистика\n"
         "/help - Подробная справка\n\n"
         "Нажми кнопку ниже или отправь /track чтобы начать!"
     )
@@ -1514,6 +1519,18 @@ def show_tracking_status(message):
         msg += f"📍 Маршрут: {info.get('from', 'N/A')} → {info.get('to', 'N/A')}\n"
         
         bot.send_message(chat_id, msg, parse_mode="HTML")
+
+@bot.message_handler(commands=['favorites'])
+def show_favorites_command(message):
+    """Показывает избранные маршруты пользователя"""
+    chat_id = message.chat.id
+    show_favorites_impl(message, chat_id)
+
+@bot.message_handler(commands=['stats'])
+def show_stats_command(message):
+    """Показывает статистику пользователя"""
+    chat_id = message.chat.id
+    show_user_stats_impl(message, chat_id)
 
 @bot.message_handler(func=lambda message: message.chat.id in user_steps)
 def handle_step_input(message):
@@ -2155,9 +2172,106 @@ def on_back_button(message):
             KeyboardButton("🚂 Начать поиск"),
             KeyboardButton("📊 Мои трекинги"),
             KeyboardButton("📜 История"),
-            KeyboardButton("❓ Помощь")
+            KeyboardButton("❓ Помощь"),
+            KeyboardButton("⭐ Избранное"),
+            KeyboardButton("📈 Моя статистика")
         )
     )
+
+def show_favorites_impl(message, chat_id):
+    """Показывает избранные маршруты пользователя"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT * FROM favorite_routes 
+            WHERE chat_id = ?
+            ORDER BY created_at DESC
+        """, (chat_id,))
+        favorites = cursor.fetchall()
+    
+    if not favorites:
+        msg = "⭐ <b>Избранные маршруты</b>\n\n"
+        msg += "У вас пока нет избранных маршрутов.\n\n"
+        msg += "Добавляйте маршруты в избранное:\n"
+        msg += "• Нажмите кнопку ⭐ под результатами поиска\n"
+        msg += "• Или используйте /track для нового поиска"
+        
+        keyboard = InlineKeyboardMarkup()
+        keyboard.add(InlineKeyboardButton("➕ Добавить новый маршрут", callback_data="fav_add_new"))
+        
+        if hasattr(message, 'reply_to') and callable(getattr(message, 'reply_to', None)):
+            message.reply_to(msg, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            bot.send_message(chat_id, msg, parse_mode="HTML", reply_markup=keyboard)
+        return
+    
+    msg = "⭐ <b>Избранные маршруты</b>\n\n"
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    for fav in favorites:
+        from_st = fav['from_station']
+        to_st = fav['to_station']
+        passengers = fav['passengers']
+        route_id = fav['id']
+        
+        msg += f"🚂 {from_st} → {to_st} ({passengers} пасс.)\n"
+        
+        # Кнопка быстрого поиска
+        btn_text = f"🔍 Быстрый поиск"
+        callback_data = f"f av_search_{route_id}_{from_st}_{to_st}_{passengers}".replace(" ", "")
+        keyboard.add(InlineKeyboardButton(btn_text, callback_data=callback_data))
+        
+        # Кнопка удаления
+        del_btn = InlineKeyboardButton("❌ Удалить", callback_data=f"f av_delete_{route_id}".replace(" ", ""))
+        keyboard.row(del_btn)
+        
+        msg += "\n"
+    
+    keyboard.add(InlineKeyboardButton("➕ Добавить новый маршрут", callback_data="fav_add_new"))
+    
+    if hasattr(message, 'reply_to') and callable(getattr(message, 'reply_to', None)):
+        message.reply_to(msg, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        bot.send_message(chat_id, msg, parse_mode="HTML", reply_markup=keyboard)
+
+def show_user_stats_impl(message, chat_id):
+    """Показывает статистику пользователя"""
+    stats = get_user_stats(chat_id)
+    
+    # Получаем количество активных трекингов и избранных маршрутов
+    active_trackings = len(get_user_trackings(chat_id))
+    
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) as count FROM favorite_routes WHERE chat_id = ?", (chat_id,))
+        fav_count = cursor.fetchone()['count']
+    
+    if not stats:
+        # Если статистики еще нет, создаем запись с нулями
+        update_user_stats(chat_id, 0, 0, 0.0)
+        stats = get_user_stats(chat_id)
+    
+    total_searches = stats['total_searches'] if stats else 0
+    successful_bookings = stats['successful_bookings'] if stats else 0
+    total_savings = stats['total_savings'] if stats else 0.0
+    
+    msg = "📈 <b>Ваша статистика</b>\n\n"
+    msg += f"🔍 Всего поисков: <b>{total_searches}</b>\n"
+    msg += f"🎫 Успешных бронирований: <b>{successful_bookings}</b>\n"
+    msg += f"💰 Сэкономлено: <b>{total_savings:.2f} BYN</b>\n"
+    msg += f"🔔 Активных трекингов: <b>{active_trackings}</b>\n"
+    msg += f"⭐ Избранных маршрутов: <b>{fav_count}</b>\n"
+    
+    # Конверсия
+    if total_searches > 0:
+        conversion = (successful_bookings / total_searches) * 100
+        msg += f"📊 Конверсия: <b>{conversion:.1f}%</b>\n"
+    
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("🔁 Обновить", callback_data="refresh_stats"))
+    
+    if hasattr(message, 'reply_to') and callable(getattr(message, 'reply_to', None)):
+        message.reply_to(msg, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        bot.send_message(chat_id, msg, parse_mode="HTML", reply_markup=keyboard)
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
