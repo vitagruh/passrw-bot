@@ -263,31 +263,37 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 requests_count INTEGER DEFAULT 0,
                 seats_available INTEGER DEFAULT 0,
+                min_price INTEGER DEFAULT 0,
+                max_price INTEGER DEFAULT 999999,
+                carriage_types TEXT DEFAULT '[]',
+                check_interval INTEGER DEFAULT 60,
+                alt_dates INTEGER DEFAULT 0,
                 FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
             )
         """)
         
-        # Таблица истории поисков
+        # Таблица избранных маршрутов
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS search_history (
+            CREATE TABLE IF NOT EXISTS favorite_routes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL,
                 from_station TEXT NOT NULL,
                 to_station TEXT NOT NULL,
-                date TEXT NOT NULL,
-                passengers INTEGER NOT NULL,
-                searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                passengers INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
             )
         """)
         
-        # Таблица популярных станций
+        # Таблица статистики пользователей
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS popular_stations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                station_name TEXT UNIQUE NOT NULL,
-                usage_count INTEGER DEFAULT 1,
-                last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS user_statistics (
+                chat_id INTEGER PRIMARY KEY,
+                total_searches INTEGER DEFAULT 0,
+                successful_bookings INTEGER DEFAULT 0,
+                total_tickets_found INTEGER DEFAULT 0,
+                last_booking_date TIMESTAMP,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
             )
         """)
         
@@ -295,6 +301,7 @@ def init_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trackings_chat ON active_trackings(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON search_history(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_stations_name ON popular_stations(station_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorites_chat ON favorite_routes(chat_id)")
         
         logger.info("✅ База данных успешно инициализирована")
 
@@ -311,18 +318,78 @@ def save_user(chat_id: int, username: str = None, first_name: str = None, last_n
                 last_active = CURRENT_TIMESTAMP
         """, (chat_id, username, first_name, last_name))
 
+def save_favorite_route(chat_id: int, from_station: str, to_station: str, passengers: int = 1):
+    """Сохраняет маршрут в избранные"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO favorite_routes (chat_id, from_station, to_station, passengers)
+            VALUES (?, ?, ?, ?)
+        """, (chat_id, from_station, to_station, passengers))
+
+def get_favorite_routes(chat_id: int) -> List[sqlite3.Row]:
+    """Получает избранные маршруты пользователя"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT * FROM favorite_routes 
+            WHERE chat_id = ?
+            ORDER BY created_at DESC
+        """, (chat_id,))
+        return cursor.fetchall()
+
+def delete_favorite_route(chat_id: int, route_id: int):
+    """Удаляет избранный маршрут"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            DELETE FROM favorite_routes 
+            WHERE id = ? AND chat_id = ?
+        """, (route_id, chat_id))
+
+def update_user_statistics(chat_id: int, tickets_found: int = 0, booking_success: bool = False):
+    """Обновляет статистику пользователя"""
+    with get_db_cursor() as cursor:
+        if booking_success:
+            cursor.execute("""
+                INSERT INTO user_statistics (chat_id, total_searches, successful_bookings, total_tickets_found, last_booking_date)
+                VALUES (?, 0, 1, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    successful_bookings = successful_bookings + 1,
+                    total_tickets_found = total_tickets_found + ?,
+                    last_booking_date = CURRENT_TIMESTAMP
+            """, (chat_id, tickets_found, tickets_found))
+        else:
+            cursor.execute("""
+                INSERT INTO user_statistics (chat_id, total_searches, successful_bookings, total_tickets_found)
+                VALUES (?, 1, 0, 0)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    total_searches = total_searches + 1
+            """, (chat_id,))
+
+def get_user_statistics(chat_id: int) -> Optional[sqlite3.Row]:
+    """Получает статистику пользователя"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT * FROM user_statistics 
+            WHERE chat_id = ?
+        """, (chat_id,))
+        return cursor.fetchone()
+
 def save_tracking_to_db(chat_id: int, from_station: str, to_station: str, 
                         date: str, passengers: int, train_time: str, 
-                        heartbeat_enabled: bool = False, heartbeat_interval: int = 1800):
+                        heartbeat_enabled: bool = False, heartbeat_interval: int = 1800,
+                        min_price: int = 0, max_price: int = 999999, 
+                        carriage_types: str = '[]', check_interval: int = 60,
+                        alt_dates: int = 0):
     """Сохраняет активный трекинг в базу данных"""
     with get_db_cursor() as cursor:
         cursor.execute("""
             INSERT INTO active_trackings 
             (chat_id, from_station, to_station, date, passengers, train_time, 
-             heartbeat_enabled, heartbeat_interval)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             heartbeat_enabled, heartbeat_interval, min_price, max_price, 
+             carriage_types, check_interval, alt_dates)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (chat_id, from_station, to_station, date, passengers, train_time,
-              1 if heartbeat_enabled else 0, heartbeat_interval))
+              1 if heartbeat_enabled else 0, heartbeat_interval, min_price, max_price,
+              carriage_types, check_interval, alt_dates))
 
 def remove_tracking_from_db(chat_id: int, tracking_id: int = None, train_time: str = None):
     """Удаляет трекинг из базы данных по ID или train_time"""
@@ -781,10 +848,17 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
             ]
 
             if suitable:
+                # Формируем кнопку "Перейти к поезду"
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("🚂 Перейти к поезду", url=f"https://pass.rw.by/ru/route/?{urlencode({'from': from_station, 'to': to_station, 'date': date})}"))
+                
                 msg = f"🎉 <b>УСПЕХ!</b> Места для {num_passengers} чел. в поезде {selected_time} появились!\n\n"
                 msg += f"📍 {from_station} → {to_station}\n📅 {date}"
-                bot.send_message(chat_id, msg, parse_mode="HTML")
+                bot.send_message(chat_id, msg, parse_mode="HTML", reply_markup=kb)
                 send_detailed_train_info(chat_id, current_train, num_passengers)
+                
+                # Обновляем статистику пользователя
+                update_user_statistics(chat_id, tickets_found=len(suitable), booking_success=True)
                 
                 active_jobs.pop(chat_id, None)
                 heartbeat_enabled.discard(chat_id)  # Убираем из heartbeat при успехе
@@ -1439,19 +1513,19 @@ def on_confirm(call):
     # Логирование запуска мониторинга пользователем
     logger.info(f"▶️ Пользователь {chat_id} запустил мониторинг поезда №{sel_num} ({sel_time}) | Маршрут: {info['from']} → {info['to']}")
 
-    # Предлагаем выбрать интервал heartbeat
+    # Предлагаем настроить фильтры и интервал heartbeat
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("10 мин", callback_data=f"hb_interval_600_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("20 мин", callback_data=f"hb_interval_1200_{sel_time}_{sel_num}")
+        InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
+        InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
     )
     kb.add(
-        InlineKeyboardButton("30 мин", callback_data=f"hb_interval_1800_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("1 час", callback_data=f"hb_interval_3600_{sel_time}_{sel_num}")
+        InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
+        InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
     )
-    kb.add(InlineKeyboardButton("❌ Без heartbeat", callback_data=f"heartbeat_no_{sel_time}_{sel_num}"))
+    kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
     
-    bot.send_message(chat_id, "💓 Выберите интервал сообщений 'Бот работает':", reply_markup=kb)
+    bot.send_message(chat_id, "⚙️ Настройте параметры отслеживания:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("hb_interval_") or call.data.startswith("heartbeat_no_"))
 def on_heartbeat_choice(call):
