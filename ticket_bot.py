@@ -235,13 +235,14 @@ def init_database():
         os.makedirs(db_dir, exist_ok=True)
     
     with get_db_cursor() as cursor:
-        # Таблица пользователей
+        # Таблица пользователей с ролевой моделью
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 chat_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
+                role TEXT DEFAULT 'user',  -- 'user', 'admin', 'moderator'
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -342,12 +343,26 @@ def init_database():
             )
         """)
         
+        # Таблица логов действий пользователей (для админ-панели)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                details TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            )
+        """)
+        
         # Индексы для ускорения поиска
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trackings_chat ON active_trackings(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON search_history(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_stations_name ON popular_stations(station_name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorites_chat ON favorite_routes(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_feature_flags_name ON feature_flags(flag_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_logs_chat ON user_logs(chat_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_logs_created ON user_logs(created_at)")
         
         # Инициализация default feature flags
         cursor.execute("""
@@ -361,18 +376,50 @@ def init_database():
         
         logger.info("✅ База данных успешно инициализирована")
 
-def save_user(chat_id: int, username: str = None, first_name: str = None, last_name: str = None):
-    """Сохраняет или обновляет информацию о пользователе"""
+def save_user(chat_id: int, username: str = None, first_name: str = None, last_name: str = None, role: str = None):
+    """Сохраняет или обновляет информацию о пользователе с поддержкой ролей"""
+    with get_db_cursor() as cursor:
+        if role:
+            cursor.execute("""
+                INSERT INTO users (chat_id, username, first_name, last_name, role, last_active)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    username = excluded.username,
+                    first_name = excluded.first_name,
+                    last_name = excluded.last_name,
+                    role = excluded.role,
+                    last_active = CURRENT_TIMESTAMP
+            """, (chat_id, username, first_name, last_name, role))
+        else:
+            cursor.execute("""
+                INSERT INTO users (chat_id, username, first_name, last_name, last_active)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    username = excluded.username,
+                    first_name = excluded.first_name,
+                    last_name = excluded.last_name,
+                    last_active = CURRENT_TIMESTAMP
+            """, (chat_id, username, first_name, last_name))
+
+def get_user_role(chat_id: int) -> str:
+    """Получает роль пользователя"""
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT role FROM users WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        return row['role'] if row else 'user'
+
+def is_admin(chat_id: int) -> bool:
+    """Проверяет, является ли пользователь администратором"""
+    role = get_user_role(chat_id)
+    return role in ['admin', 'moderator']
+
+def log_user_action(chat_id: int, action: str, details: str = ""):
+    """Логирует действия пользователей в базу данных для админ-панели"""
     with get_db_cursor() as cursor:
         cursor.execute("""
-            INSERT INTO users (chat_id, username, first_name, last_name, last_active)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                username = excluded.username,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                last_active = CURRENT_TIMESTAMP
-        """, (chat_id, username, first_name, last_name))
+            INSERT INTO user_logs (chat_id, action, details, created_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        """, (chat_id, action, details))
 
 def save_tracking_to_db(chat_id: int, from_station: str, to_station: str, 
                         date: str, passengers: int, train_time: str, 
@@ -1136,6 +1183,171 @@ def send_welcome(message):
     )
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
     log_action(message, "START", f"User started bot. Name: {first_name}")
+
+@bot.message_handler(commands=['admin'])
+def admin_menu(message):
+    """Админ-меню для пользователей с ролью admin/moderator"""
+    chat_id = message.chat.id
+    
+    if not is_admin(chat_id):
+        bot.send_message(chat_id, "❌ У вас нет прав администратора.")
+        log_user_action(chat_id, "ADMIN_ACCESS_DENIED", f"Non-admin user tried to access admin menu")
+        return
+    
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard.add(KeyboardButton("📊 Админ-статистика"))
+    keyboard.add(KeyboardButton("📜 Просмотр логов"))
+    keyboard.add(KeyboardButton("👥 Пользователи"))
+    keyboard.add(KeyboardButton("🔙 Назад"))
+    
+    text = (
+        "🔐 <b>Панель администратора</b>\n\n"
+        "Доступные функции:\n"
+        "• 📊 Просмотр общей статистики\n"
+        "• 📜 Чтение логов действий пользователей\n"
+        "• 👥 Управление пользователями\n\n"
+        "Выберите действие:"
+    )
+    bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
+    log_user_action(chat_id, "ADMIN_MENU", "Admin menu accessed")
+
+@bot.message_handler(func=lambda message: message.text == "📜 Просмотр логов")
+def view_logs_menu(message):
+    """Просмотр логов для администраторов"""
+    chat_id = message.chat.id
+    
+    if not is_admin(chat_id):
+        bot.send_message(chat_id, "❌ У вас нет прав администратора.")
+        return
+    
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard.add(KeyboardButton("📊 Админ-статистика"))
+    keyboard.add(KeyboardButton("👥 Пользователи"))
+    keyboard.add(KeyboardButton("🔙 Назад"))
+    
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT u.chat_id, u.username, ul.action, ul.details, ul.created_at
+            FROM user_logs ul
+            JOIN users u ON ul.chat_id = u.chat_id
+            ORDER BY ul.created_at DESC
+            LIMIT 50
+        """)
+        logs = cursor.fetchall()
+    
+    if not logs:
+        bot.send_message(chat_id, "📭 Логи пока пусты.", reply_markup=keyboard)
+        return
+    
+    log_text = "📜 <b>Последние действия пользователей (50):</b>\n\n"
+    for log in logs:
+        username = f"@{log['username']}" if log['username'] else f"ID:{log['chat_id']}"
+        time_str = log['created_at'].split(' ')[1][:5] if log['created_at'] else '?'
+        log_text += f"⏰ {time_str} | {username}\n"
+        log_text += f"   ├─ Действие: {log['action']}\n"
+        if log['details']:
+            details = log['details'][:100] + "..." if len(log['details']) > 100 else log['details']
+            log_text += f"   └─ Детали: {details}\n"
+        log_text += "\n"
+    
+    # Отправляем частями, так как Telegram имеет лимит на длину сообщения
+    for i in range(0, len(log_text), 4000):
+        bot.send_message(chat_id, log_text[i:i+4000], parse_mode="HTML", reply_markup=keyboard)
+    
+    log_user_action(chat_id, "VIEW_LOGS", f"Admin viewed {len(logs)} log entries")
+
+@bot.message_handler(func=lambda message: message.text == "📊 Админ-статистика")
+def admin_statistics(message):
+    """Показывает общую статистику для администраторов"""
+    chat_id = message.chat.id
+    
+    if not is_admin(chat_id):
+        bot.send_message(chat_id, "❌ У вас нет прав администратора.")
+        return
+    
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard.add(KeyboardButton("📜 Просмотр логов"))
+    keyboard.add(KeyboardButton("👥 Пользователи"))
+    keyboard.add(KeyboardButton("🔙 Назад"))
+    
+    with get_db_cursor() as cursor:
+        # Общее количество пользователей
+        cursor.execute("SELECT COUNT(*) as count FROM users")
+        total_users = cursor.fetchone()['count']
+        
+        # Активные трекинги
+        cursor.execute("SELECT COUNT(*) as count FROM active_trackings")
+        active_trackings = cursor.fetchone()['count']
+        
+        # Всего поисков за сегодня
+        cursor.execute("""
+            SELECT COUNT(*) as count FROM search_history 
+            WHERE date(searched_at) = date('now')
+        """)
+        today_searches = cursor.fetchone()['count']
+        
+        # Топ-5 пользователей по активности
+        cursor.execute("""
+            SELECT u.chat_id, u.username, COUNT(sh.id) as search_count
+            FROM users u
+            LEFT JOIN search_history sh ON u.chat_id = sh.chat_id
+            GROUP BY u.chat_id
+            ORDER BY search_count DESC
+            LIMIT 5
+        """)
+        top_users = cursor.fetchall()
+    
+    stats_text = (
+        "📊 <b>Админ-статистика</b>\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"🚂 Активных трекингов: {active_trackings}\n"
+        f"🔍 Поисков сегодня: {today_searches}\n\n"
+        "<b>Топ-5 активных пользователей:</b>\n"
+    )
+    
+    for i, user in enumerate(top_users, 1):
+        username = f"@{user['username']}" if user['username'] else f"ID:{user['chat_id']}"
+        stats_text += f"{i}. {username} — {user['search_count']} поисков\n"
+    
+    bot.send_message(chat_id, stats_text, parse_mode="HTML", reply_markup=keyboard)
+    log_user_action(chat_id, "ADMIN_STATS", "Viewed admin statistics")
+
+@bot.message_handler(func=lambda message: message.text == "👥 Пользователи")
+def admin_users_menu(message):
+    """Меню управления пользователями для администраторов"""
+    chat_id = message.chat.id
+    
+    if not is_admin(chat_id):
+        bot.send_message(chat_id, "❌ У вас нет прав администратора.")
+        return
+    
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard.add(KeyboardButton("📊 Админ-статистика"))
+    keyboard.add(KeyboardButton("📜 Просмотр логов"))
+    keyboard.add(KeyboardButton("🔙 Назад"))
+    
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT chat_id, username, first_name, role, created_at, last_active
+            FROM users
+            ORDER BY last_active DESC
+            LIMIT 20
+        """)
+        users = cursor.fetchall()
+    
+    users_text = "👥 <b>Последние пользователи (20):</b>\n\n"
+    for user in users:
+        username = f"@{user['username']}" if user['username'] else "NoUsername"
+        name = user['first_name'] or "Unknown"
+        role_emoji = "🔐" if user['role'] == 'admin' else "👤"
+        last_active = user['last_active'].split(' ')[1][:5] if user['last_active'] else '?'
+        users_text += f"{role_emoji} {name} ({username})\n"
+        users_text += f"   Роль: {user['role']} | Активен: {last_active}\n\n"
+    
+    for i in range(0, len(users_text), 4000):
+        bot.send_message(chat_id, users_text[i:i+4000], parse_mode="HTML", reply_markup=keyboard)
+    
+    log_user_action(chat_id, "VIEW_USERS", "Viewed users list")
 
 @bot.message_handler(commands=['help'])
 def show_help(message):

@@ -255,6 +255,7 @@ def get_all_trackings() -> List[sqlite3.Row]:
                 u.username,
                 u.first_name,
                 u.last_name,
+                u.role,
                 u.created_at as user_created_at,
                 u.last_active
             FROM active_trackings at
@@ -494,6 +495,29 @@ def get_admin_logs(limit: int = 100) -> List[sqlite3.Row]:
         return cursor.fetchall()
 
 
+def get_user_logs(limit: int = 100, chat_id: int = None) -> List[sqlite3.Row]:
+    """Получить логи действий пользователей с фильтрацией по chat_id"""
+    with get_db_cursor() as cursor:
+        if chat_id:
+            cursor.execute("""
+                SELECT ul.*, u.username, u.first_name, u.role
+                FROM user_logs ul
+                JOIN users u ON ul.chat_id = u.chat_id
+                WHERE ul.chat_id = ?
+                ORDER BY ul.created_at DESC
+                LIMIT ?
+            """, (chat_id, limit))
+        else:
+            cursor.execute("""
+                SELECT ul.*, u.username, u.first_name, u.role
+                FROM user_logs ul
+                JOIN users u ON ul.chat_id = u.chat_id
+                ORDER BY ul.created_at DESC
+                LIMIT ?
+            """, (limit,))
+        return cursor.fetchall()
+
+
 def send_telegram_alert(message: str):
     """Отправка Telegram алерта админу"""
     if not ALERT_CHAT_ID:
@@ -716,14 +740,14 @@ BASE_TEMPLATE = '''
                     <a href="{{ url_for('trackings_list') }}" class="{% if request.endpoint == 'trackings_list' %}active{% endif %}">
                         <i class="bi bi-list-task"></i> Все трекинги
                     </a>
-                    <a href="{{ url_for('users_list') }}" class="{% if request.endpoint == 'users_list' %}active{% endif %}">
+                    <a href="{{ url_for('users_management') }}" class="{% if request.endpoint == 'users_management' %}active{% endif %}">
                         <i class="bi bi-people"></i> Пользователи
                     </a>
                     <a href="{{ url_for('send_message') }}" class="{% if request.endpoint == 'send_message' %}active{% endif %}">
                         <i class="bi bi-chat-dots"></i> Отправить сообщение
                     </a>
                     <a href="{{ url_for('admin_logs') }}" class="{% if request.endpoint == 'admin_logs' %}active{% endif %}">
-                        <i class="bi bi-journal-text"></i> Логи админа
+                        <i class="bi bi-journal-text"></i> Логи
                     </a>
                     <hr class="mx-3">
                     <a href="{{ url_for('logout') }}" class="text-danger">
@@ -1693,9 +1717,105 @@ def send_message():
 @app.route('/logs')
 @login_required
 def admin_logs():
-    """Логи действий администраторов"""
-    logs = get_admin_logs(100)
-    return render_template_string(LOGS_TEMPLATE, logs=logs)
+    """Логи действий администраторов и пользователей"""
+    admin_logs_list = get_admin_logs(50)
+    user_logs_list = get_user_logs(50)
+    
+    # Получаем chat_id для фильтрации (если указан)
+    filter_chat_id = request.args.get('chat_id', type=int)
+    if filter_chat_id:
+        user_logs_list = get_user_logs(50, chat_id=filter_chat_id)
+    
+    return render_template_string(LOGS_TEMPLATE, 
+                                  admin_logs=admin_logs_list, 
+                                  user_logs=user_logs_list,
+                                  filter_chat_id=filter_chat_id)
+
+
+@app.route('/users')
+@login_required
+def users_management():
+    """Управление пользователями и просмотр их логов"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT 
+                u.chat_id, 
+                u.username, 
+                u.first_name, 
+                u.last_name, 
+                u.role, 
+                u.created_at, 
+                u.last_active,
+                COUNT(at.id) as active_trackings_count,
+                COUNT(sh.id) as total_searches
+            FROM users u
+            LEFT JOIN active_trackings at ON u.chat_id = at.chat_id
+            LEFT JOIN search_history sh ON u.chat_id = sh.chat_id
+            GROUP BY u.chat_id
+            ORDER BY u.last_active DESC
+        """)
+        users = cursor.fetchall()
+    
+    return render_template_string(USERS_TEMPLATE, users=users)
+
+
+@app.route('/user/<int:chat_id>')
+@login_required
+def user_detail(chat_id):
+    """Детальная информация о пользователе с логами"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT 
+                u.*, 
+                COUNT(DISTINCT at.id) as active_trackings_count,
+                COUNT(DISTINCT sh.id) as total_searches,
+                COUNT(DISTINCT fr.id) as favorites_count
+            FROM users u
+            LEFT JOIN active_trackings at ON u.chat_id = at.chat_id
+            LEFT JOIN search_history sh ON u.chat_id = sh.chat_id
+            LEFT JOIN favorite_routes fr ON u.chat_id = fr.chat_id
+            WHERE u.chat_id = ?
+            GROUP BY u.chat_id
+        """, (chat_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            abort(404)
+        
+        # Получаем логи пользователя
+        user_logs_list = get_user_logs(100, chat_id=chat_id)
+        
+        # Получаем активные трекинги
+        cursor.execute("""
+            SELECT * FROM active_trackings WHERE chat_id = ?
+        """, (chat_id,))
+        trackings = cursor.fetchall()
+    
+    return render_template_string(USER_DETAIL_TEMPLATE, 
+                                  user=user, 
+                                  user_logs=user_logs_list,
+                                  trackings=trackings)
+
+
+@app.route('/user/<int:chat_id>/set_role', methods=['POST'])
+@login_required
+def set_user_role(chat_id):
+    """Изменение роли пользователя"""
+    new_role = request.form.get('role', 'user')
+    
+    if new_role not in ['user', 'moderator', 'admin']:
+        flash('Недопустимая роль', 'danger')
+        return redirect(url_for('users_management'))
+    
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            UPDATE users SET role = ? WHERE chat_id = ?
+        """, (new_role, chat_id))
+    
+    log_admin_action(session['admin_username'], 'SET_USER_ROLE', 
+                     f'chat_id={chat_id}, role={new_role}')
+    flash(f'Роль пользователя {chat_id} изменена на {new_role}', 'success')
+    return redirect(url_for('user_detail', chat_id=chat_id))
 
 
 # ============================================
