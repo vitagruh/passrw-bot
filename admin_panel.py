@@ -890,9 +890,10 @@ DASHBOARD_TEMPLATE = BASE_TEMPLATE.replace(
                     <div class="d-flex flex-wrap gap-2">
                         {% for hour in range(24) %}
                             {% set count = stats.hourly_activity.get('%02d' % hour, 0) %}
+                            {% set height = [count / 10 * 50, 50] | min %}
                             <div class="text-center" style="min-width: 30px;">
                                 <div class="small text-muted">{{ hour }}</div>
-                                <div class="bg-primary rounded" style="height: {{ (count / 10 * 50) | min(50) }}px; width: 20px; margin: 2px auto;"></div>
+                                <div class="bg-primary rounded" style="height: {{ height }}px; width: 20px; margin: 2px auto;"></div>
                                 <div class="small">{{ count }}</div>
                             </div>
                         {% endfor %}
