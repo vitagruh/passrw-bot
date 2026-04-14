@@ -1759,43 +1759,6 @@ def users_management():
     return render_template_string(USERS_TEMPLATE, users=users)
 
 
-@app.route('/user/<int:chat_id>')
-@login_required
-def user_detail(chat_id):
-    """Детальная информация о пользователе с логами"""
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            SELECT 
-                u.*, 
-                COUNT(DISTINCT at.id) as active_trackings_count,
-                COUNT(DISTINCT sh.id) as total_searches,
-                COUNT(DISTINCT fr.id) as favorites_count
-            FROM users u
-            LEFT JOIN active_trackings at ON u.chat_id = at.chat_id
-            LEFT JOIN search_history sh ON u.chat_id = sh.chat_id
-            LEFT JOIN favorite_routes fr ON u.chat_id = fr.chat_id
-            WHERE u.chat_id = ?
-            GROUP BY u.chat_id
-        """, (chat_id,))
-        user = cursor.fetchone()
-        
-        if not user:
-            abort(404)
-        
-        # Получаем логи пользователя
-        user_logs_list = get_user_logs(100, chat_id=chat_id)
-        
-        # Получаем активные трекинги
-        cursor.execute("""
-            SELECT * FROM active_trackings WHERE chat_id = ?
-        """, (chat_id,))
-        trackings = cursor.fetchall()
-    
-    return render_template_string(USER_DETAIL_TEMPLATE, 
-                                  user=user, 
-                                  user_logs=user_logs_list,
-                                  trackings=trackings)
-
 
 @app.route('/user/<int:chat_id>/set_role', methods=['POST'])
 @login_required
