@@ -1441,7 +1441,6 @@ def handle_step_input(message):
                     InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
                 )
                 kb.add(
-                    InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
                     InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
                 )
                 kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
@@ -1552,7 +1551,6 @@ def handle_step_input(message):
                 InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
             )
             kb.add(
-                InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
                 InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
             )
             kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
@@ -1661,7 +1659,6 @@ def on_confirm(call):
         InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
     )
     kb.add(
-        InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
         InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
     )
     kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
@@ -1671,7 +1668,6 @@ def on_confirm(call):
 # Обработчики для кнопок настройки фильтров
 @bot.callback_query_handler(func=lambda call: call.data.startswith("set_price_") or 
                                         call.data.startswith("set_carriage_") or 
-                                        call.data.startswith("set_alt_dates_") or 
                                         call.data.startswith("set_interval_"))
 def on_filter_setup(call):
     """Обработчик кнопок настройки фильтров"""
@@ -1717,21 +1713,9 @@ def on_filter_setup(call):
         bot.answer_callback_query(call.id, "🛏 Выберите тип вагона", show_alert=False)
         bot.send_message(chat_id, "🛏 <b>Фильтр типа вагона</b>\n\nВыберите тип вагона, который вас интересует:", parse_mode="HTML", reply_markup=kb)
         
-    elif filter_type == "alt_dates":
-        kb = InlineKeyboardMarkup(row_width=2)
-        kb.add(
-            InlineKeyboardButton("Без альтернатив", callback_data=f"alt_dates_selected_0_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("±1 день", callback_data=f"alt_dates_selected_1_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("±2 дня", callback_data=f"alt_dates_selected_2_{sel_time}_{sel_num}")
-        )
-        kb.add(InlineKeyboardButton("🔙 Назад", callback_data=f"confirm_{sel_time}_{sel_num}"))
-        bot.answer_callback_query(call.id, "📅 Выберите диапазон дат", show_alert=False)
-        bot.send_message(chat_id, "📅 <b>Альтернативные даты</b>\n\nБот будет проверять билеты не только на выбранную дату, но и на соседние:", parse_mode="HTML", reply_markup=kb)
-        
     elif filter_type == "interval":
         kb = InlineKeyboardMarkup(row_width=1)
         kb.add(
-            InlineKeyboardButton("⏱ 30 секунд", callback_data=f"interval_selected_30_{sel_time}_{sel_num}"),
             InlineKeyboardButton("⏱ 1 минута", callback_data=f"interval_selected_60_{sel_time}_{sel_num}"),
             InlineKeyboardButton("⏱ 2 минуты", callback_data=f"interval_selected_120_{sel_time}_{sel_num}"),
             InlineKeyboardButton("⏱ 5 минут", callback_data=f"interval_selected_300_{sel_time}_{sel_num}"),
@@ -1787,57 +1771,6 @@ def on_carriage_selected(call):
         InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
     )
     kb.add(
-        InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
-    )
-    kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
-    
-    bot.send_message(chat_id, f"{msg}\n\n⚙️ Настройте другие параметры или подтвердите:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("alt_dates_selected_"))
-def on_alt_dates_selected(call):
-    """Обработчик выбора альтернативных дат"""
-    chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    
-    if len(parts) < 6:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
-        return
-    
-    try:
-        days_range = int(parts[3])
-    except ValueError:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
-        return
-    
-    sel_time = parts[4]
-    sel_num = parts[5]
-    
-    info = user_data.get(chat_id)
-    if not info:
-        bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
-        return
-    
-    if 'filters' not in info:
-        info['filters'] = {}
-    
-    if days_range == 0:
-        info['filters'].pop('alt_dates', None)
-        msg = "❌ Альтернативные даты отключены"
-    else:
-        info['filters']['alt_dates'] = days_range
-        msg = f"✅ Бот будет проверять ±{days_range} дн. от выбранной даты"
-    
-    bot.answer_callback_query(call.id, msg, show_alert=False)
-    
-    # Возвращаемся к меню настройки
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
-    )
-    kb.add(
-        InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
         InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
     )
     kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
@@ -1889,7 +1822,6 @@ def on_interval_selected(call):
         InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
     )
     kb.add(
-        InlineKeyboardButton("📅 ± Даты", callback_data=f"set_alt_dates_{sel_time}_{sel_num}"),
         InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
     )
     kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
