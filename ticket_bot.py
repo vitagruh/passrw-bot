@@ -263,24 +263,6 @@ def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 requests_count INTEGER DEFAULT 0,
                 seats_available INTEGER DEFAULT 0,
-                min_price INTEGER DEFAULT 0,
-                max_price INTEGER DEFAULT 999999,
-                carriage_types TEXT DEFAULT '[]',
-                check_interval INTEGER DEFAULT 60,
-                alt_dates INTEGER DEFAULT 0,
-                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Таблица избранных маршрутов
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS favorite_routes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                from_station TEXT NOT NULL,
-                to_station TEXT NOT NULL,
-                passengers INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
             )
         """)
@@ -292,20 +274,20 @@ def init_database():
                 chat_id INTEGER NOT NULL,
                 from_station TEXT NOT NULL,
                 to_station TEXT NOT NULL,
-                search_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                date TEXT NOT NULL,
+                passengers INTEGER NOT NULL,
+                searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
             )
         """)
         
-        # Таблица статистики пользователей
+        # Таблица популярных станций
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS user_statistics (
-                chat_id INTEGER PRIMARY KEY,
-                total_searches INTEGER DEFAULT 0,
-                successful_bookings INTEGER DEFAULT 0,
-                total_tickets_found INTEGER DEFAULT 0,
-                last_booking_date TIMESTAMP,
-                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            CREATE TABLE IF NOT EXISTS popular_stations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                station_name TEXT UNIQUE NOT NULL,
+                usage_count INTEGER DEFAULT 1,
+                last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
@@ -313,7 +295,6 @@ def init_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trackings_chat ON active_trackings(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON search_history(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_stations_name ON popular_stations(station_name)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorites_chat ON favorite_routes(chat_id)")
         
         logger.info("✅ База данных успешно инициализирована")
 
@@ -330,78 +311,18 @@ def save_user(chat_id: int, username: str = None, first_name: str = None, last_n
                 last_active = CURRENT_TIMESTAMP
         """, (chat_id, username, first_name, last_name))
 
-def save_favorite_route(chat_id: int, from_station: str, to_station: str, passengers: int = 1):
-    """Сохраняет маршрут в избранные"""
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            INSERT INTO favorite_routes (chat_id, from_station, to_station, passengers)
-            VALUES (?, ?, ?, ?)
-        """, (chat_id, from_station, to_station, passengers))
-
-def get_favorite_routes(chat_id: int) -> List[sqlite3.Row]:
-    """Получает избранные маршруты пользователя"""
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            SELECT * FROM favorite_routes 
-            WHERE chat_id = ?
-            ORDER BY created_at DESC
-        """, (chat_id,))
-        return cursor.fetchall()
-
-def delete_favorite_route(chat_id: int, route_id: int):
-    """Удаляет избранный маршрут"""
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            DELETE FROM favorite_routes 
-            WHERE id = ? AND chat_id = ?
-        """, (route_id, chat_id))
-
-def update_user_statistics(chat_id: int, tickets_found: int = 0, booking_success: bool = False):
-    """Обновляет статистику пользователя"""
-    with get_db_cursor() as cursor:
-        if booking_success:
-            cursor.execute("""
-                INSERT INTO user_statistics (chat_id, total_searches, successful_bookings, total_tickets_found, last_booking_date)
-                VALUES (?, 0, 1, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(chat_id) DO UPDATE SET
-                    successful_bookings = successful_bookings + 1,
-                    total_tickets_found = total_tickets_found + ?,
-                    last_booking_date = CURRENT_TIMESTAMP
-            """, (chat_id, tickets_found, tickets_found))
-        else:
-            cursor.execute("""
-                INSERT INTO user_statistics (chat_id, total_searches, successful_bookings, total_tickets_found)
-                VALUES (?, 1, 0, 0)
-                ON CONFLICT(chat_id) DO UPDATE SET
-                    total_searches = total_searches + 1
-            """, (chat_id,))
-
-def get_user_statistics(chat_id: int) -> Optional[sqlite3.Row]:
-    """Получает статистику пользователя"""
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            SELECT * FROM user_statistics 
-            WHERE chat_id = ?
-        """, (chat_id,))
-        return cursor.fetchone()
-
 def save_tracking_to_db(chat_id: int, from_station: str, to_station: str, 
                         date: str, passengers: int, train_time: str, 
-                        heartbeat_enabled: bool = False, heartbeat_interval: int = 1800,
-                        min_price: int = 0, max_price: int = 999999, 
-                        carriage_types: str = '[]', check_interval: int = 60,
-                        alt_dates: int = 0):
+                        heartbeat_enabled: bool = False, heartbeat_interval: int = 1800):
     """Сохраняет активный трекинг в базу данных"""
     with get_db_cursor() as cursor:
         cursor.execute("""
             INSERT INTO active_trackings 
             (chat_id, from_station, to_station, date, passengers, train_time, 
-             heartbeat_enabled, heartbeat_interval, min_price, max_price, 
-             carriage_types, check_interval, alt_dates)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             heartbeat_enabled, heartbeat_interval)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (chat_id, from_station, to_station, date, passengers, train_time,
-              1 if heartbeat_enabled else 0, heartbeat_interval, min_price, max_price,
-              carriage_types, check_interval, alt_dates))
+              1 if heartbeat_enabled else 0, heartbeat_interval))
 
 def remove_tracking_from_db(chat_id: int, tracking_id: int = None, train_time: str = None):
     """Удаляет трекинг из базы данных по ID или train_time"""
@@ -737,9 +658,6 @@ def parse_carriage_info(status_cell):
             seats_span = quant_elem.find('span') if quant_elem else None
             seats_raw = seats_span.get_text(strip=True) if seats_span else "?"
             
-            # Извлекаем data-car-type для определения типа вагона (2, 3, 4)
-            car_type_code = quant_elem.get('data-car-type') if quant_elem else None
-            
             # Очищаем количество мест (убираем текст "мест", оставляем цифры или ставим 0)
             seats = "0"
             if seats_raw != "?":
@@ -758,8 +676,7 @@ def parse_carriage_info(status_cell):
             carriages.append({
                 'type': carriage_type,
                 'seats': seats,
-                'price_byn': price_byn,
-                'car_type_code': car_type_code  # Код типа вагона: 2=Сидячий, 3=Плацкартный, 4=Купейный
+                'price_byn': price_byn
             })
         except Exception as e:
             logger.warning(f"⚠️ Ошибка парсинга вагона: {e}")
@@ -834,7 +751,7 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
 
             if not current_train:
                 log_action(fake_msg, "TRACKING_TRAIN_NOT_FOUND", f"Train: {selected_time} not found in results")
-                time.sleep(filters['check_interval'])
+                time.sleep(CHECK_INTERVAL)
                 continue
             
             # Обновляем информацию о поезде в статусе
@@ -864,17 +781,10 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
             ]
 
             if suitable:
-                # Формируем кнопку "Перейти к поезду"
-                kb = InlineKeyboardMarkup()
-                kb.add(InlineKeyboardButton("🚂 Перейти к поезду", url=f"https://pass.rw.by/ru/route/?{urlencode({'from': from_station, 'to': to_station, 'date': date})}"))
-                
                 msg = f"🎉 <b>УСПЕХ!</b> Места для {num_passengers} чел. в поезде {selected_time} появились!\n\n"
                 msg += f"📍 {from_station} → {to_station}\n📅 {date}"
-                bot.send_message(chat_id, msg, parse_mode="HTML", reply_markup=kb)
+                bot.send_message(chat_id, msg, parse_mode="HTML")
                 send_detailed_train_info(chat_id, current_train, num_passengers)
-                
-                # Обновляем статистику пользователя
-                update_user_statistics(chat_id, tickets_found=len(suitable), booking_success=True)
                 
                 active_jobs.pop(chat_id, None)
                 heartbeat_enabled.discard(chat_id)  # Убираем из heartbeat при успехе
@@ -888,11 +798,11 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 return
 
             logger.debug(f"[{datetime.now().strftime('%H:%M')}] Нет мест для {chat_id} | Поезд: {selected_time}. Ждем...")
-            time.sleep(filters['check_interval'])
+            time.sleep(CHECK_INTERVAL)
             
         except Exception as e:
             logger.error(f"Ошибка в потоке трекинга {chat_id}: {e}", exc_info=True)
-            time.sleep(filters['check_interval'])
+            time.sleep(CHECK_INTERVAL)
     
     # === ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ПОТОКА ===
     # Поток завершился (по любой причине: stop_flag, удаление из БД, успех)
@@ -948,8 +858,7 @@ def send_welcome(message):
     # Создаем клавиатуру с популярными станциями и командами
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     keyboard.add(KeyboardButton("🚂 Начать поиск"))
-    keyboard.add(KeyboardButton("📊 Мои трекинги"), KeyboardButton("⭐ Избранное"))
-    keyboard.add(KeyboardButton("📈 Статистика"), KeyboardButton("📜 История"))
+    keyboard.add(KeyboardButton("📊 Мои трекинги"), KeyboardButton("📜 История"))
     keyboard.add(KeyboardButton("❓ Помощь"))
     
     text = (
@@ -1097,68 +1006,6 @@ def show_history(message):
     
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
     log_action(message, "HISTORY_REQUESTED", "User requested search history")
-
-def show_favorites(message):
-    """Показывает избранные маршруты пользователя"""
-    chat_id = message.chat.id
-    
-    favorites = get_favorite_routes(chat_id)
-    
-    if not favorites:
-        bot.reply_to(message, "⭐ У вас пока нет избранных маршрутов.\nДобавьте маршрут через /track и сохраните его в избранное.")
-        return
-    
-    text = "⭐ <b>Ваши избранные маршруты:</b>\n\n"
-    keyboard = InlineKeyboardMarkup(row_width=1)
-    
-    for i, fav in enumerate(favorites, 1):
-        text += f"{i}. 🚂 <b>{fav['from_station']} → {fav['to_station']}</b>\n"
-        text += f"   👥 {fav['passengers']} чел.\n"
-        text += f"   ⏰ Добавлен: {fav['created_at'][:16].replace('T', ' ')}\n\n"
-        
-        # Кнопка для быстрого использования
-        btn_text = f"🔍 Использовать: {fav['from_station']} → {fav['to_station']}"
-        callback_data = f"use_favorite_{fav['id']}_{fav['from_station']}_{fav['to_station']}_{fav['passengers']}"
-        if len(callback_data) > 64:
-            callback_data = callback_data[:64]
-        keyboard.add(InlineKeyboardButton(btn_text[:50], callback_data=callback_data))
-        
-        # Кнопка удаления
-        del_btn = f"🗑 Удалить #{fav['id']}"
-        keyboard.add(InlineKeyboardButton(del_btn, callback_data=f"del_favorite_{fav['id']}"))
-    
-    bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
-    log_action(message, "FAVORITES_REQUESTED", "User requested favorite routes")
-
-def show_user_statistics(message):
-    """Показывает статистику пользователя"""
-    chat_id = message.chat.id
-    
-    stats = get_user_statistics(chat_id)
-    
-    if not stats:
-        # Создаем запись статистики если её нет
-        update_user_statistics(chat_id)
-        stats = get_user_statistics(chat_id)
-    
-    text = "📈 <b>Ваша статистика</b>\n\n"
-    text += f"🔍 Всего поисков: {stats['total_searches']}\n"
-    text += f"✅ Успешных бронирований: {stats['successful_bookings']}\n"
-    text += f"🎫 Всего найдено билетов: {stats['total_tickets_found']}\n"
-    
-    if stats['last_booking_date']:
-        text += f"📅 Последнее бронирование: {stats['last_booking_date'][:16].replace('T', ' ')}\n"
-    else:
-        text += "📅 Последнее бронирование: не было\n"
-    
-    # Получаем количество активных трекингов
-    active_trackings = len(get_user_trackings(chat_id))
-    text += f"🔄 Активных трекингов: {active_trackings}\n\n"
-    
-    text += "<i>Статистика обновляется автоматически при использовании бота.</i>"
-    
-    bot.send_message(chat_id, text, parse_mode="HTML")
-    log_action(message, "STATISTICS_REQUESTED", "User requested statistics")
 
 @bot.message_handler(commands=['track'])
 def start_track(message):
@@ -1433,36 +1280,6 @@ def handle_step_input(message):
     
     # Логирование ввода пользователя
     logger.info(f"📝 Пользователь {chat_id} вводит на шаге {current_step}: '{text}'")
-    
-    # Обработка команды /skip для пропуска фильтра цены
-    if text == "/skip":
-        info = user_data.get(chat_id)
-        if info and info.get('waiting_for') == 'price_filter':
-            # Пропускаем фильтр цены
-            info.pop('waiting_for', None)
-            filter_temp = info.pop('filter_temp', {})
-            sel_time = filter_temp.get('time')
-            sel_num = filter_temp.get('num')
-            
-            if sel_time and sel_num:
-                bot.send_message(chat_id, "💰 Фильтр цены пропущен. Настройте другие параметры или подтвердите.")
-                # Возвращаемся к меню настройки
-                kb = InlineKeyboardMarkup(row_width=2)
-                kb.add(
-                    InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
-                    InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
-                )
-                kb.add(
-                    InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
-                )
-                kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
-                bot.send_message(chat_id, "⚙️ Настройте параметры отслеживания:", reply_markup=kb)
-            else:
-                bot.send_message(chat_id, "❌ Ошибка сессии. Начните заново с /track")
-            return
-        else:
-            bot.send_message(chat_id, "❌ Сейчас не требуется пропуск фильтра. Введите ожидаемое значение.")
-            return
 
     if current_step == 'ask_from':
         user_data[chat_id]['from'] = text
@@ -1527,48 +1344,6 @@ def handle_step_input(message):
             return
 
         show_train_list(chat_id, trains)
-    
-    elif current_step == 'price_filter':
-        # Обработка ввода максимальной цены
-        info = user_data.get(chat_id)
-        if not info:
-            bot.send_message(chat_id, "❌ Ошибка сессии. Начните заново с /track")
-            return
-        
-        try:
-            max_price = float(text.replace(',', '.'))
-            if max_price <= 0:
-                raise ValueError("Цена должна быть больше 0")
-        except ValueError:
-            bot.send_message(chat_id, "❌ Введите корректную сумму (число больше 0). Пример: 50 или 50.50")
-            return
-        
-        # Сохраняем фильтр цены
-        if 'filters' not in info:
-            info['filters'] = {}
-        info['filters']['max_price'] = max_price
-        
-        filter_temp = info.pop('filter_temp', {})
-        info.pop('waiting_for', None)
-        sel_time = filter_temp.get('time')
-        sel_num = filter_temp.get('num')
-        
-        bot.send_message(chat_id, f"💰 Фильтр цены установлен: до {max_price:.2f} BYN")
-        
-        if sel_time and sel_num:
-            # Возвращаемся к меню настройки
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
-                InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
-            )
-            kb.add(
-                InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
-            )
-            kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
-            bot.send_message(chat_id, "⚙️ Настройте другие параметры или подтвердите:", reply_markup=kb)
-        else:
-            bot.send_message(chat_id, "❌ Ошибка сессии. Начните заново с /track")
 
 def show_train_list(chat_id, trains):
     keyboard = InlineKeyboardMarkup(row_width=1)
@@ -1664,244 +1439,19 @@ def on_confirm(call):
     # Логирование запуска мониторинга пользователем
     logger.info(f"▶️ Пользователь {chat_id} запустил мониторинг поезда №{sel_num} ({sel_time}) | Маршрут: {info['from']} → {info['to']}")
 
-    # Предлагаем настроить фильтры и интервал heartbeat
+    # Предлагаем выбрать интервал heartbeat
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
+        InlineKeyboardButton("10 мин", callback_data=f"hb_interval_600_{sel_time}_{sel_num}"),
+        InlineKeyboardButton("20 мин", callback_data=f"hb_interval_1200_{sel_time}_{sel_num}")
     )
     kb.add(
-        InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
+        InlineKeyboardButton("30 мин", callback_data=f"hb_interval_1800_{sel_time}_{sel_num}"),
+        InlineKeyboardButton("1 час", callback_data=f"hb_interval_3600_{sel_time}_{sel_num}")
     )
-    kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
+    kb.add(InlineKeyboardButton("❌ Без heartbeat", callback_data=f"heartbeat_no_{sel_time}_{sel_num}"))
     
-    bot.send_message(chat_id, "⚙️ Настройте параметры отслеживания:", reply_markup=kb)
-
-# Обработчики для кнопок настройки фильтров
-@bot.callback_query_handler(func=lambda call: call.data.startswith("set_price_") or 
-                                        call.data.startswith("set_carriage_") or 
-                                        call.data.startswith("set_interval_"))
-def on_filter_setup(call):
-    """Обработчик кнопок настройки фильтров"""
-    chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    
-    if len(parts) < 4:
-        bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
-        return
-    
-    filter_type = parts[1]  # price, carriage, alt_dates, interval
-    sel_time = parts[2]
-    sel_num = parts[3]
-    
-    info = user_data.get(chat_id)
-    if not info:
-        bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
-        return
-    
-    # Инициализируем фильтры в сессии если их нет
-    if 'filters' not in info:
-        info['filters'] = {}
-    
-    if filter_type == "price":
-        bot.answer_callback_query(call.id, "💰 Введите максимальную цену билета (или /skip чтобы пропустить)", show_alert=False)
-        bot.send_message(chat_id, "💰 <b>Фильтр цены</b>\n\nВведите максимальную сумму в BYN, которую вы готовы заплатить за билет.\n\nПример: 50\n\nИли нажмите /skip чтобы пропустить этот фильтр.", parse_mode="HTML")
-        # Устанавливаем флаг ожидания ввода цены
-        info['waiting_for'] = 'price_filter'
-        info['filter_temp'] = {'time': sel_time, 'num': sel_num}
-        # Устанавливаем шаг для обработки ввода
-        user_steps[chat_id] = 'price_filter'
-        
-    elif filter_type == "carriage":
-        kb = InlineKeyboardMarkup(row_width=1)
-        kb.add(
-            InlineKeyboardButton("🛏 Плацкарт", callback_data=f"carriage_selected_PL_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("🚊 Купе", callback_data=f"carriage_selected_CU_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("💎 СВ", callback_data=f"carriage_selected_SV_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("🪑 Общий", callback_data=f"carriage_selected_CO_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("❌ Без фильтра", callback_data=f"carriage_selected_NONE_{sel_time}_{sel_num}")
-        )
-        kb.add(InlineKeyboardButton("🔙 Назад", callback_data=f"confirm_{sel_time}_{sel_num}"))
-        bot.answer_callback_query(call.id, "🛏 Выберите тип вагона", show_alert=False)
-        bot.send_message(chat_id, "🛏 <b>Фильтр типа вагона</b>\n\nВыберите тип вагона, который вас интересует:", parse_mode="HTML", reply_markup=kb)
-        
-    elif filter_type == "interval":
-        kb = InlineKeyboardMarkup(row_width=1)
-        kb.add(
-            InlineKeyboardButton("⏱ 1 минута", callback_data=f"interval_selected_60_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("⏱ 2 минуты", callback_data=f"interval_selected_120_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("⏱ 5 минут", callback_data=f"interval_selected_300_{sel_time}_{sel_num}"),
-            InlineKeyboardButton("⏱ 10 минут", callback_data=f"interval_selected_600_{sel_time}_{sel_num}")
-        )
-        kb.add(InlineKeyboardButton("🔙 Назад", callback_data=f"confirm_{sel_time}_{sel_num}"))
-        bot.answer_callback_query(call.id, "⏱ Выберите интервал проверки", show_alert=False)
-        bot.send_message(chat_id, "⏱ <b>Интервал проверки</b>\n\nКак часто бот должен проверять наличие билетов?\n\n⚠️ Чем меньше интервал, тем выше нагрузка на сервер.", parse_mode="HTML", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("carriage_selected_"))
-def on_carriage_selected(call):
-    """Обработчик выбора типа вагона"""
-    chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    
-    if len(parts) < 6:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
-        return
-    
-    carriage_type = parts[3]
-    sel_time = parts[4]
-    sel_num = parts[5]
-    
-    info = user_data.get(chat_id)
-    if not info:
-        bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
-        return
-    
-    if 'filters' not in info:
-        info['filters'] = {}
-    
-    carriage_names = {
-        'PL': 'Плацкарт',
-        'CU': 'Купе',
-        'SV': 'СВ',
-        'CO': 'Общий',
-        'NONE': 'Без фильтра'
-    }
-    
-    if carriage_type == 'NONE':
-        info['filters'].pop('carriage_type', None)
-        msg = "❌ Фильтр типа вагона отключен"
-    else:
-        info['filters']['carriage_type'] = carriage_type
-        msg = f"✅ Выбран тип вагона: {carriage_names.get(carriage_type, carriage_type)}"
-    
-    bot.answer_callback_query(call.id, msg, show_alert=False)
-    
-    # Возвращаемся к меню настройки
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
-    )
-    kb.add(
-        InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
-    )
-    kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
-    
-    bot.send_message(chat_id, f"{msg}\n\n⚙️ Настройте другие параметры или подтвердите:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("interval_selected_"))
-def on_interval_selected(call):
-    """Обработчик выбора интервала проверки"""
-    chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    
-    if len(parts) < 6:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
-        return
-    
-    try:
-        interval_sec = int(parts[3])
-    except ValueError:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
-        return
-    
-    sel_time = parts[4]
-    sel_num = parts[5]
-    
-    info = user_data.get(chat_id)
-    if not info:
-        bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
-        return
-    
-    if 'filters' not in info:
-        info['filters'] = {}
-    
-    info['filters']['check_interval'] = interval_sec
-    
-    minutes = interval_sec // 60
-    if minutes >= 60:
-        hours = minutes // 60
-        msg = f"✅ Интервал проверки: {hours} ч."
-    else:
-        msg = f"✅ Интервал проверки: {minutes} мин."
-    
-    bot.answer_callback_query(call.id, msg, show_alert=False)
-    
-    # Возвращаемся к меню настройки
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("💰 Фильтры цены", callback_data=f"set_price_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("🛏 Тип вагона", callback_data=f"set_carriage_{sel_time}_{sel_num}")
-    )
-    kb.add(
-        InlineKeyboardButton("⏱ Интервал", callback_data=f"set_interval_{sel_time}_{sel_num}")
-    )
-    kb.add(InlineKeyboardButton("✅ Подтвердить", callback_data=f"hb_start_{sel_time}_{sel_num}"))
-    
-    bot.send_message(chat_id, f"{msg}\n\n⚙️ Настройте другие параметры или подтвердите:", reply_markup=kb)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("hb_start_"))
-def on_hb_start(call):
-    """Обработчик кнопки подтверждения и запуска мониторинга"""
-    chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    
-    if len(parts) < 4:
-        bot.answer_callback_query(call.id, "Ошибка формата", show_alert=True)
-        return
-    
-    sel_time = parts[2]
-    sel_num = parts[3]
-    
-    info = user_data.get(chat_id)
-    if not info:
-        bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
-        return
-    
-    # Показываем меню выбора интервала heartbeat
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("⏱ 1 минута", callback_data=f"hb_interval_60_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("⏱ 5 минут", callback_data=f"hb_interval_300_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("⏱ 15 минут", callback_data=f"hb_interval_900_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("⏱ 30 минут", callback_data=f"hb_interval_1800_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("⏱ 1 час", callback_data=f"hb_interval_3600_{sel_time}_{sel_num}"),
-        InlineKeyboardButton("❌ Без heartbeat", callback_data=f"heartbeat_no_{sel_time}_{sel_num}")
-    )
-    kb.add(InlineKeyboardButton("🔙 Назад к фильтрам", callback_data=f"confirm_{sel_time}_{sel_num}"))
-    
-    bot.answer_callback_query(call.id, "⏱ Выберите интервал heartbeat-уведомлений", show_alert=False)
-    
-    filters_info = []
-    if 'filters' in info:
-        if 'carriage_type' in info['filters']:
-            carriage_names = {'PL': 'Плацкарт', 'CU': 'Купе', 'SV': 'СВ', 'CO': 'Общий'}
-            filters_info.append(f"🛏 Вагон: {carriage_names.get(info['filters']['carriage_type'], info['filters']['carriage_type'])}")
-        if 'alt_dates' in info['filters']:
-            filters_info.append(f"📅 Даты: ±{info['filters']['alt_dates']} дн.")
-        if 'check_interval' in info['filters']:
-            interval = info['filters']['check_interval']
-            if interval >= 3600:
-                filters_info.append(f"⏱ Проверка: {interval//3600} ч.")
-            elif interval >= 60:
-                filters_info.append(f"⏱ Проверка: {interval//60} мин.")
-            else:
-                filters_info.append(f"⏱ Проверка: {interval} сек.")
-    
-    filters_text = "\n".join(filters_info) if filters_info else "❌ Фильтры не настроены"
-    
-    bot.send_message(
-        chat_id, 
-        f"⚙️ <b>Параметры отслеживания:</b>\n\n"
-        f"🚂 Поезд №{sel_num} ({sel_time})\n"
-        f"📍 {info['from']} → {info['to']}\n"
-        f"📅 {info['date']}\n\n"
-        f"{filters_text}\n\n"
-        f"Выберите интервал heartbeat-уведомлений:\n"
-        f"(бот будет периодически присылать сообщения, что мониторинг работает)",
-        parse_mode="HTML",
-        reply_markup=kb
-    )
+    bot.send_message(chat_id, "💓 Выберите интервал сообщений 'Бот работает':", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("hb_interval_") or call.data.startswith("heartbeat_no_"))
 def on_heartbeat_choice(call):
@@ -1982,24 +1532,7 @@ def on_heartbeat_choice(call):
             bot.answer_callback_query(call.id, "Ошибка сессии", show_alert=True)
             return
         
-        # Извлекаем фильтры из сессии
-        filters = info.get('filters', {})
-        max_price = int(filters.get('max_price', 999999))
-        carriage_type = filters.get('carriage_type', None)
-        check_interval = filters.get('check_interval', 60)
-        alt_dates = filters.get('alt_dates', 0)
-        
-        # Преобразуем тип вагона в формат для БД
-        carriage_types_map = {
-            'PL': '3',  # Плацкарт
-            'CU': '4',  # Купе
-            'SV': '5',  # СВ
-            'CO': '2'   # Сидячий/Общий
-        }
-        carriage_codes = [carriage_types_map[carriage_type]] if carriage_type and carriage_type in carriage_types_map else []
-        carriage_types_json = json.dumps(carriage_codes)
-        
-        # Сохраняем трекинг в базу данных с фильтрами
+        # Сохраняем трекинг в базу данных
         save_tracking_to_db(
             chat_id, 
             info['from'], 
@@ -2008,12 +1541,7 @@ def on_heartbeat_choice(call):
             info['passengers'], 
             sel_time,
             chat_id in heartbeat_enabled,
-            heartbeat_intervals.get(chat_id, 1800),
-            min_price=0,
-            max_price=max_price,
-            carriage_types=carriage_types_json,
-            check_interval=check_interval,
-            alt_dates=alt_dates
+            heartbeat_intervals.get(chat_id, 1800)
         )
         
         # Сохраняем поиск в историю
@@ -2191,65 +1719,6 @@ def on_repeat_search(call):
         logger.error(f"Ошибка повтора поиска: {e}")
         bot.send_message(chat_id, f"❌ Ошибка: {e}. Попробуйте начать поиск через /track")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("use_favorite_"))
-def on_use_favorite(call):
-    """Обработчик использования избранного маршрута"""
-    chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id, "🔍 Загружаю маршрут...")
-    
-    try:
-        # Разбираем callback_data: use_favorite_ID_FROM_TO_PASSENGERS
-        parts = call.data.replace("use_favorite_", "").split("_")
-        if len(parts) >= 4:
-            fav_id = parts[0]
-            passengers = parts[-1]
-            # Станции могут содержать подчеркивания
-            station_parts = parts[1:-1]
-            mid = len(station_parts) // 2
-            from_station = "_".join(station_parts[:mid]).replace("_", " ")
-            to_station = "_".join(station_parts[mid:]).replace("_", " ")
-            
-            logger.info(f"⭐ Использование избранного: {from_station} → {to_station} | {passengers}")
-            
-            # Сохраняем данные
-            user_data[chat_id] = {
-                'from': from_station,
-                'to': to_station,
-                'passengers': int(passengers)
-            }
-            
-            # Предлагаем выбрать дату
-            bot.send_message(
-                chat_id,
-                f"🚂 Маршрут: <b>{from_station} → {to_station}</b>\n👥 Пассажиры: {passengers}\n\n📅 Выберите дату поездки:",
-                parse_mode="HTML",
-                reply_markup=calendar.create_calendar()
-            )
-            user_steps[chat_id] = 'ask_date'
-        else:
-            bot.send_message(chat_id, "❌ Ошибка при разборе данных.")
-    except Exception as e:
-        logger.error(f"Ошибка использования избранного: {e}")
-        bot.send_message(chat_id, f"❌ Ошибка: {e}")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_favorite_"))
-def on_delete_favorite(call):
-    """Обработчик удаления избранного маршрута"""
-    chat_id = call.message.chat.id
-    
-    try:
-        fav_id = int(call.data.replace("del_favorite_", ""))
-        delete_favorite_route(chat_id, fav_id)
-        
-        bot.answer_callback_query(call.id, "✅ Удалено", show_alert=False)
-        bot.send_message(chat_id, "✅ Маршрут удален из избранных.")
-        
-        # Обновляем список избранных
-        show_favorites(call.message)
-    except Exception as e:
-        logger.error(f"Ошибка удаления избранного: {e}")
-        bot.send_message(chat_id, f"❌ Ошибка: {e}")
-
 @bot.message_handler(func=lambda message: message.text in ["🚂 Начать поиск", "Начать поиск"])
 def on_start_search_button(message):
     """Обработчик кнопки 'Начать поиск' из главного меню"""
@@ -2263,20 +1732,6 @@ def on_my_trackings_button(message):
     chat_id = message.chat.id
     logger.info(f"Пользователь {chat_id} нажал кнопку 'Мои трекинги'")
     show_my_trackings(message)
-
-@bot.message_handler(func=lambda message: message.text in ["⭐ Избранное", "Избранное"])
-def on_favorites_button(message):
-    """Обработчик кнопки 'Избранное' из главного меню"""
-    chat_id = message.chat.id
-    logger.info(f"Пользователь {chat_id} нажал кнопку 'Избранное'")
-    show_favorites(message)
-
-@bot.message_handler(func=lambda message: message.text in ["📈 Статистика", "Статистика"])
-def on_statistics_button(message):
-    """Обработчик кнопки 'Статистика' из главного меню"""
-    chat_id = message.chat.id
-    logger.info(f"Пользователь {chat_id} нажал кнопку 'Статистика'")
-    show_user_statistics(message)
 
 @bot.message_handler(func=lambda message: message.text in ["📜 История", "История"])
 def on_history_button(message):
