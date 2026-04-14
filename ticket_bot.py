@@ -865,19 +865,20 @@ def send_detailed_train_info(chat_id, train, num_passengers=None, with_button=Tr
     if with_button:
         try:
             # Генерируем ссылку с параметрами для прямого перехода к поиску
-            buy_url = "https://pass.rw.by/ru/route/"
+            base_url = "https://pass.rw.by/ru/route/"
             
             # Если переданы параметры маршрута, добавляем их в URL
             if from_station and to_station and date:
-                # Преобразуем дату из DD.MM.YYYY в формат сайта (если нужно)
                 params = {
                     'from': from_station,
                     'to': to_station,
                     'date': date
                 }
-                # Кодируем параметры для URL
+                # Кодируем параметры для URL (кириллица корректно обрабатывается)
                 query_string = urlencode(params, encoding='utf-8')
-                buy_url = f"{buy_url}?{query_string}"
+                buy_url = f"{base_url}?{query_string}"
+            else:
+                buy_url = base_url
             
             keyboard = InlineKeyboardMarkup(row_width=1)
             buy_button = InlineKeyboardButton(
@@ -890,7 +891,10 @@ def send_detailed_train_info(chat_id, train, num_passengers=None, with_button=Tr
         except Exception as e:
             logger.warning(f"⚠️ Не удалось создать кнопку покупки: {e}")
     
-    bot.send_message(chat_id, full_text, parse_mode="HTML", reply_markup=keyboard)
+    # Добавляем текстовую ссылку в сообщение для надежности (если клиент не показывает кнопки)
+    link_text = f"\n\n🔗 <a href='{buy_url}'>Открыть страницу покупки в браузере</a>" if with_button and buy_url else ""
+    
+    bot.send_message(chat_id, full_text + link_text, parse_mode="HTML", reply_markup=keyboard)
 
 # --- МАШИНА СОСТОЯНИЙ (ПОШАГОВЫЙ ВВОД) ---
 
