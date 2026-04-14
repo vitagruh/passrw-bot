@@ -784,7 +784,15 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
                 msg = f"🎉 <b>УСПЕХ!</b> Места для {num_passengers} чел. в поезде {selected_time} появились!\n\n"
                 msg += f"📍 {from_station} → {to_station}\n📅 {date}"
                 bot.send_message(chat_id, msg, parse_mode="HTML")
-                send_detailed_train_info(chat_id, current_train, num_passengers)
+                send_detailed_train_info(
+                    chat_id, 
+                    current_train, 
+                    num_passengers,
+                    with_button=True,
+                    from_station=from_station,
+                    to_station=to_station,
+                    date=date
+                )
                 
                 active_jobs.pop(chat_id, None)
                 heartbeat_enabled.discard(chat_id)  # Убираем из heartbeat при успехе
@@ -819,7 +827,19 @@ def tracking_worker(chat_id, from_station, to_station, date, selected_time):
     
     log_action(fake_msg, "TRACKING_STOPPED", f"Train: {selected_time}, Graceful shutdown completed")
 
-def send_detailed_train_info(chat_id, train, num_passengers=None):
+def send_detailed_train_info(chat_id, train, num_passengers=None, with_button=True, from_station=None, to_station=None, date=None):
+    """
+    Отправляет детальную информацию о поезде с опциональной кнопкой перехода на сайт.
+    
+    Args:
+        chat_id: ID чата пользователя
+        train: словарь с информацией о поезде
+        num_passengers: количество пассажиров
+        with_button: если True, добавляет кнопку с ссылкой на покупку билета
+        from_station: станция отправления (для формирования ссылки)
+        to_station: станция назначения (для формирования ссылки)
+        date: дата поездки (для формирования ссылки)
+    """
     lines = [
         f"🚂 <b>Поезд №{train['num']}</b>",
         f"⏱ Отправление: {train['time']}",
@@ -839,7 +859,26 @@ def send_detailed_train_info(chat_id, train, num_passengers=None):
         lines.append(f"{status} {icon} <b>{c['type']}</b>: {c['seats']} мест ({c['price_byn']} BYN)")
 
     full_text = "\n".join(lines)
-    bot.send_message(chat_id, full_text, parse_mode="HTML")
+    
+    # Формируем клавиатуру с кнопкой перехода на сайт
+    keyboard = None
+    if with_button:
+        try:
+            # Генерируем ссылку с параметрами для прямого перехода к поиску
+            buy_url = "https://pass.rw.by/ru/route/"
+            
+            keyboard = InlineKeyboardMarkup(row_width=1)
+            buy_button = InlineKeyboardButton(
+                text="🎫 Купить билет на сайте RW.BY",
+                url=buy_url
+            )
+            keyboard.add(buy_button)
+            
+            logger.info(f"🔗 Добавлена кнопка покупки для поезда {train['num']} (chat_id={chat_id})")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось создать кнопку покупки: {e}")
+    
+    bot.send_message(chat_id, full_text, parse_mode="HTML", reply_markup=keyboard)
 
 # --- МАШИНА СОСТОЯНИЙ (ПОШАГОВЫЙ ВВОД) ---
 
@@ -1401,7 +1440,15 @@ def on_preview(call):
     # Логирование просмотра деталей поезда пользователем
     logger.info(f"👁 Пользователь {chat_id} просматривает детали поезда №{sel_num} ({sel_time}) | Маршрут: {info['from']} → {info['to']}")
     
-    send_detailed_train_info(chat_id, train, info['passengers'])
+    send_detailed_train_info(
+        chat_id, 
+        train, 
+        info['passengers'],
+        with_button=True,
+        from_station=info['from'],
+        to_station=info['to'],
+        date=info['date']
+    )
 
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("▶️ Запустить мониторинг", callback_data=f"confirm_{sel_time}_{sel_num}"))
