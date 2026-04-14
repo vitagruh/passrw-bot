@@ -932,7 +932,8 @@ def send_welcome(message):
     # Создаем клавиатуру с популярными станциями и командами
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     keyboard.add(KeyboardButton("🚂 Начать поиск"))
-    keyboard.add(KeyboardButton("📊 Мои трекинги"), KeyboardButton("📜 История"))
+    keyboard.add(KeyboardButton("📊 Мои трекинги"), KeyboardButton("⭐ Избранное"))
+    keyboard.add(KeyboardButton("📈 Статистика"), KeyboardButton("📜 История"))
     keyboard.add(KeyboardButton("❓ Помощь"))
     
     text = (
@@ -1080,6 +1081,68 @@ def show_history(message):
     
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
     log_action(message, "HISTORY_REQUESTED", "User requested search history")
+
+def show_favorites(message):
+    """Показывает избранные маршруты пользователя"""
+    chat_id = message.chat.id
+    
+    favorites = get_favorite_routes(chat_id)
+    
+    if not favorites:
+        bot.reply_to(message, "⭐ У вас пока нет избранных маршрутов.\nДобавьте маршрут через /track и сохраните его в избранное.")
+        return
+    
+    text = "⭐ <b>Ваши избранные маршруты:</b>\n\n"
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    for i, fav in enumerate(favorites, 1):
+        text += f"{i}. 🚂 <b>{fav['from_station']} → {fav['to_station']}</b>\n"
+        text += f"   👥 {fav['passengers']} чел.\n"
+        text += f"   ⏰ Добавлен: {fav['created_at'][:16].replace('T', ' ')}\n\n"
+        
+        # Кнопка для быстрого использования
+        btn_text = f"🔍 Использовать: {fav['from_station']} → {fav['to_station']}"
+        callback_data = f"use_favorite_{fav['id']}_{fav['from_station']}_{fav['to_station']}_{fav['passengers']}"
+        if len(callback_data) > 64:
+            callback_data = callback_data[:64]
+        keyboard.add(InlineKeyboardButton(btn_text[:50], callback_data=callback_data))
+        
+        # Кнопка удаления
+        del_btn = f"🗑 Удалить #{fav['id']}"
+        keyboard.add(InlineKeyboardButton(del_btn, callback_data=f"del_favorite_{fav['id']}"))
+    
+    bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
+    log_action(message, "FAVORITES_REQUESTED", "User requested favorite routes")
+
+def show_user_statistics(message):
+    """Показывает статистику пользователя"""
+    chat_id = message.chat.id
+    
+    stats = get_user_statistics(chat_id)
+    
+    if not stats:
+        # Создаем запись статистики если её нет
+        update_user_statistics(chat_id)
+        stats = get_user_statistics(chat_id)
+    
+    text = "📈 <b>Ваша статистика</b>\n\n"
+    text += f"🔍 Всего поисков: {stats['total_searches']}\n"
+    text += f"✅ Успешных бронирований: {stats['successful_bookings']}\n"
+    text += f"🎫 Всего найдено билетов: {stats['total_tickets_found']}\n"
+    
+    if stats['last_booking_date']:
+        text += f"📅 Последнее бронирование: {stats['last_booking_date'][:16].replace('T', ' ')}\n"
+    else:
+        text += "📅 Последнее бронирование: не было\n"
+    
+    # Получаем количество активных трекингов
+    active_trackings = len(get_user_trackings(chat_id))
+    text += f"🔄 Активных трекингов: {active_trackings}\n\n"
+    
+    text += "<i>Статистика обновляется автоматически при использовании бота.</i>"
+    
+    bot.send_message(chat_id, text, parse_mode="HTML")
+    log_action(message, "STATISTICS_REQUESTED", "User requested statistics")
 
 @bot.message_handler(commands=['track'])
 def start_track(message):
@@ -1793,6 +1856,65 @@ def on_repeat_search(call):
         logger.error(f"Ошибка повтора поиска: {e}")
         bot.send_message(chat_id, f"❌ Ошибка: {e}. Попробуйте начать поиск через /track")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("use_favorite_"))
+def on_use_favorite(call):
+    """Обработчик использования избранного маршрута"""
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id, "🔍 Загружаю маршрут...")
+    
+    try:
+        # Разбираем callback_data: use_favorite_ID_FROM_TO_PASSENGERS
+        parts = call.data.replace("use_favorite_", "").split("_")
+        if len(parts) >= 4:
+            fav_id = parts[0]
+            passengers = parts[-1]
+            # Станции могут содержать подчеркивания
+            station_parts = parts[1:-1]
+            mid = len(station_parts) // 2
+            from_station = "_".join(station_parts[:mid]).replace("_", " ")
+            to_station = "_".join(station_parts[mid:]).replace("_", " ")
+            
+            logger.info(f"⭐ Использование избранного: {from_station} → {to_station} | {passengers}")
+            
+            # Сохраняем данные
+            user_data[chat_id] = {
+                'from': from_station,
+                'to': to_station,
+                'passengers': int(passengers)
+            }
+            
+            # Предлагаем выбрать дату
+            bot.send_message(
+                chat_id,
+                f"🚂 Маршрут: <b>{from_station} → {to_station}</b>\n👥 Пассажиры: {passengers}\n\n📅 Выберите дату поездки:",
+                parse_mode="HTML",
+                reply_markup=calendar.create_calendar()
+            )
+            user_steps[chat_id] = 'ask_date'
+        else:
+            bot.send_message(chat_id, "❌ Ошибка при разборе данных.")
+    except Exception as e:
+        logger.error(f"Ошибка использования избранного: {e}")
+        bot.send_message(chat_id, f"❌ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_favorite_"))
+def on_delete_favorite(call):
+    """Обработчик удаления избранного маршрута"""
+    chat_id = call.message.chat.id
+    
+    try:
+        fav_id = int(call.data.replace("del_favorite_", ""))
+        delete_favorite_route(chat_id, fav_id)
+        
+        bot.answer_callback_query(call.id, "✅ Удалено", show_alert=False)
+        bot.send_message(chat_id, "✅ Маршрут удален из избранных.")
+        
+        # Обновляем список избранных
+        show_favorites(call.message)
+    except Exception as e:
+        logger.error(f"Ошибка удаления избранного: {e}")
+        bot.send_message(chat_id, f"❌ Ошибка: {e}")
+
 @bot.message_handler(func=lambda message: message.text in ["🚂 Начать поиск", "Начать поиск"])
 def on_start_search_button(message):
     """Обработчик кнопки 'Начать поиск' из главного меню"""
@@ -1806,6 +1928,20 @@ def on_my_trackings_button(message):
     chat_id = message.chat.id
     logger.info(f"Пользователь {chat_id} нажал кнопку 'Мои трекинги'")
     show_my_trackings(message)
+
+@bot.message_handler(func=lambda message: message.text in ["⭐ Избранное", "Избранное"])
+def on_favorites_button(message):
+    """Обработчик кнопки 'Избранное' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Избранное'")
+    show_favorites(message)
+
+@bot.message_handler(func=lambda message: message.text in ["📈 Статистика", "Статистика"])
+def on_statistics_button(message):
+    """Обработчик кнопки 'Статистика' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Статистика'")
+    show_user_statistics(message)
 
 @bot.message_handler(func=lambda message: message.text in ["📜 История", "История"])
 def on_history_button(message):
