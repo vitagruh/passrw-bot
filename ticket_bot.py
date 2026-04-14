@@ -867,6 +867,18 @@ def send_detailed_train_info(chat_id, train, num_passengers=None, with_button=Tr
             # Генерируем ссылку с параметрами для прямого перехода к поиску
             buy_url = "https://pass.rw.by/ru/route/"
             
+            # Если переданы параметры маршрута, добавляем их в URL
+            if from_station and to_station and date:
+                # Преобразуем дату из DD.MM.YYYY в формат сайта (если нужно)
+                params = {
+                    'from': from_station,
+                    'to': to_station,
+                    'date': date
+                }
+                # Кодируем параметры для URL
+                query_string = urlencode(params, encoding='utf-8')
+                buy_url = f"{buy_url}?{query_string}"
+            
             keyboard = InlineKeyboardMarkup(row_width=1)
             buy_button = InlineKeyboardButton(
                 text="🎫 Купить билет на сайте RW.BY",
@@ -874,7 +886,7 @@ def send_detailed_train_info(chat_id, train, num_passengers=None, with_button=Tr
             )
             keyboard.add(buy_button)
             
-            logger.info(f"🔗 Добавлена кнопка покупки для поезда {train['num']} (chat_id={chat_id})")
+            logger.info(f"🔗 Добавлена кнопка покупки для поезда {train['num']} (chat_id={chat_id}): {buy_url}")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось создать кнопку покупки: {e}")
     
