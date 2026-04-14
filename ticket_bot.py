@@ -309,6 +309,16 @@ def init_database():
             )
         """)
         
+        # Таблица популярных станций
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS popular_stations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                station_name TEXT NOT NULL UNIQUE,
+                usage_count INTEGER DEFAULT 1,
+                last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Индексы для ускорения поиска
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trackings_chat ON active_trackings(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON search_history(chat_id)")
