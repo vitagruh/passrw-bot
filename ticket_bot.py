@@ -291,10 +291,73 @@ def init_database():
             )
         """)
         
+        # Таблица избранных маршрутов пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS favorite_routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                from_station TEXT NOT NULL,
+                to_station TEXT NOT NULL,
+                passengers INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            )
+        """)
+        
+        # Таблица статистики пользователей
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_stats (
+                chat_id INTEGER PRIMARY KEY,
+                total_searches INTEGER DEFAULT 0,
+                successful_bookings INTEGER DEFAULT 0,
+                total_savings REAL DEFAULT 0.0,
+                last_stats_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE CASCADE
+            )
+        """)
+        
+        # Таблица feature flags для A/B тестирования
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS feature_flags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                flag_name TEXT UNIQUE NOT NULL,
+                is_enabled BOOLEAN DEFAULT 0,
+                description TEXT,
+                ab_test_group TEXT,  -- 'A', 'B', или NULL для всех
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Таблица событий для webhook интеграции
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                payload TEXT,
+                chat_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent BOOLEAN DEFAULT 0,
+                retry_count INTEGER DEFAULT 0
+            )
+        """)
+        
         # Индексы для ускорения поиска
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trackings_chat ON active_trackings(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON search_history(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_stations_name ON popular_stations(station_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_favorites_chat ON favorite_routes(chat_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_feature_flags_name ON feature_flags(flag_name)")
+        
+        # Инициализация default feature flags
+        cursor.execute("""
+            INSERT OR IGNORE INTO feature_flags (flag_name, is_enabled, description, ab_test_group)
+            VALUES 
+                ('context_menu_enabled', 1, 'Включить контекстное меню под результатами', NULL),
+                ('price_alerts_enabled', 0, 'Уведомления об изменении цены', NULL),
+                ('smart_suggestions', 1, 'Умные подсказки маршрутов', 'A'),
+                ('new_ui_layout', 0, 'Новый UI layout результатов', 'B')
+        """)
         
         logger.info("✅ База данных успешно инициализирована")
 
@@ -389,6 +452,9 @@ def save_search_history(chat_id: int, from_station: str, to_station: str,
             VALUES (?, ?, ?, ?, ?)
         """, (chat_id, from_station, to_station, date, passengers))
         
+        # Обновляем статистику пользователя (+1 поиск)
+        update_user_stats(chat_id, searches_increment=1)
+        
         # Обновляем счетчик использования станций
         for station in [from_station, to_station]:
             cursor.execute("""
@@ -420,6 +486,136 @@ def get_popular_stations(limit: int = 10) -> List[sqlite3.Row]:
             LIMIT ?
         """, (limit,))
         return cursor.fetchall()
+
+# ============================================
+# НОВЫЕ ФУНКЦИИ ДЛЯ HIGH PRIORITY ФУНКЦИОНАЛА
+# ============================================
+
+def save_favorite_route(chat_id: int, from_station: str, to_station: str, passengers: int = 1):
+    """Сохраняет маршрут в избранные"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO favorite_routes (chat_id, from_station, to_station, passengers)
+            VALUES (?, ?, ?, ?)
+        """, (chat_id, from_station, to_station, passengers))
+        logger.info(f"✅ Маршрут {from_station} -> {to_station} добавлен в избранное для пользователя {chat_id}")
+
+def get_user_favorite_routes(chat_id: int) -> List[sqlite3.Row]:
+    """Получает избранные маршруты пользователя"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT * FROM favorite_routes 
+            WHERE chat_id = ?
+            ORDER BY created_at DESC
+        """, (chat_id,))
+        return cursor.fetchall()
+
+def remove_favorite_route(chat_id: int, route_id: int) -> bool:
+    """Удаляет маршрут из избранных"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            DELETE FROM favorite_routes 
+            WHERE id = ? AND chat_id = ?
+        """, (route_id, chat_id))
+        deleted = cursor.rowcount > 0
+        if deleted:
+            logger.info(f"✅ Маршрут ID={route_id} удален из избранных для пользователя {chat_id}")
+        return deleted
+
+def update_user_stats(chat_id: int, searches_increment: int = 0, bookings_increment: int = 0, savings: float = 0.0):
+    """Обновляет статистику пользователя"""
+    with get_db_cursor() as cursor:
+        # Сначала проверяем, есть ли запись
+        cursor.execute("SELECT chat_id FROM user_stats WHERE chat_id = ?", (chat_id,))
+        exists = cursor.fetchone()
+        
+        if exists:
+            cursor.execute("""
+                UPDATE user_stats 
+                SET total_searches = total_searches + ?,
+                    successful_bookings = successful_bookings + ?,
+                    total_savings = total_savings + ?,
+                    last_stats_update = CURRENT_TIMESTAMP
+                WHERE chat_id = ?
+            """, (searches_increment, bookings_increment, savings, chat_id))
+        else:
+            cursor.execute("""
+                INSERT INTO user_stats (chat_id, total_searches, successful_bookings, total_savings)
+                VALUES (?, ?, ?, ?)
+            """, (chat_id, searches_increment, bookings_increment, savings))
+        
+        logger.info(f"📊 Статистика пользователя {chat_id} обновлена: +{searches_increment} поисков, +{bookings_increment} бронирований, +{savings} BYN savings")
+
+def get_user_stats(chat_id: int) -> Optional[sqlite3.Row]:
+    """Получает статистику пользователя"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT * FROM user_stats 
+            WHERE chat_id = ?
+        """, (chat_id,))
+        return cursor.fetchone()
+
+def is_feature_enabled(flag_name: str, chat_id: int = None) -> bool:
+    """
+    Проверяет, включен ли feature flag.
+    Поддерживает A/B тестирование через ab_test_group.
+    """
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT is_enabled, ab_test_group FROM feature_flags 
+            WHERE flag_name = ?
+        """, (flag_name,))
+        result = cursor.fetchone()
+        
+        if not result:
+            logger.warning(f"⚠️ Feature flag '{flag_name}' не найден, возвращаем False")
+            return False
+        
+        is_enabled, ab_test_group = result['is_enabled'], result['ab_test_group']
+        
+        # Если нет A/B группы или chat_id не передан, возвращаем общий статус
+        if not ab_test_group or chat_id is None:
+            return bool(is_enabled)
+        
+        # Логика A/B тестирования: распределяем пользователей по группам
+        # Пользователи с четным chat_id -> группа A, нечетным -> группа B
+        user_group = 'A' if chat_id % 2 == 0 else 'B'
+        
+        if user_group == ab_test_group:
+            return bool(is_enabled)
+        else:
+            return False
+
+def set_feature_flag(flag_name: str, is_enabled: bool, description: str = ""):
+    """Устанавливает значение feature flag (используется в админ-панели)"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO feature_flags (flag_name, is_enabled, description, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(flag_name) DO UPDATE SET
+                is_enabled = excluded.is_enabled,
+                description = excluded.description,
+                updated_at = CURRENT_TIMESTAMP
+        """, (flag_name, 1 if is_enabled else 0, description))
+        logger.info(f"🚩 Feature flag '{flag_name}' установлен в {is_enabled}")
+
+def get_all_feature_flags() -> List[sqlite3.Row]:
+    """Получает все feature flags (для админ-панели)"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            SELECT * FROM feature_flags 
+            ORDER BY flag_name
+        """)
+        return cursor.fetchall()
+
+def log_webhook_event(event_type: str, payload: Dict, chat_id: int = None):
+    """Логгирует событие для webhook интеграции"""
+    with get_db_cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO webhook_events (event_type, payload, chat_id)
+            VALUES (?, ?, ?)
+        """, (event_type, json.dumps(payload), chat_id))
+        logger.info(f"🔗 Webhook событие '{event_type}' залоггировано для chat_id={chat_id}")
 
 def restore_active_trackings(bot_instance):
     """Восстанавливает активные трекинги после перезапуска бота"""
@@ -1732,6 +1928,142 @@ def on_quick_start(call):
 @bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("repeat_search_"))
 def on_repeat_search(call):
     """Обработчик повтора поиска из истории"""
+    chat_id = call.message.chat.id
+    data = call.data.replace("repeat_search_", "").split("_")
+    
+    if len(data) < 4:
+        bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
+        return
+    
+    # Парсим данные: from_to_date_passengers
+    passengers = int(data[-1])
+    date = data[-2]
+    to_station = data[-3]
+    from_station = "_".join(data[:-3])  # Все что до to_station (может содержать _)
+    
+    logger.info(f"🔁 Пользователь {chat_id} повторил поиск: {from_station} → {to_station} ({date})")
+    
+    # Сохраняем в user_data и запускаем процесс поиска
+    user_data[chat_id] = {
+        'from': from_station,
+        'to': to_station,
+        'date': date,
+        'passengers': passengers
+    }
+    
+    bot.answer_callback_query(call.id, f"Поиск: {from_station} → {to_station}")
+    
+    # Сразу показываем календарь для выбора даты (или используем сохраненную)
+    calendar_result = calendar.get_calendar()
+    bot.send_message(
+        chat_id, 
+        f"📅 Выберите дату поездки для {from_station} → {to_station}:",
+        reply_markup=calendar_result
+    )
+
+@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("fav_add_"))
+def on_add_to_favorites(call):
+    """Обработчик добавления маршрута в избранное"""
+    chat_id = call.message.chat.id
+    data = call.data.replace("fav_add_", "").split("_")
+    
+    if len(data) < 3:
+        bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
+        return
+    
+    # Парсим данные: from_to_passengers
+    passengers = int(data[-1])
+    to_station = data[-2]
+    from_station = "_".join(data[:-2])  # Все что до to_station
+    
+    try:
+        save_favorite_route(chat_id, from_station, to_station, passengers)
+        bot.answer_callback_query(call.id, f"⭐ Маршрут {from_station} → {to_station} добавлен в избранное!", show_alert=True)
+        
+        # Логируем webhook событие
+        log_webhook_event("favorite_added", {
+            "chat_id": chat_id,
+            "from_station": from_station,
+            "to_station": to_station,
+            "passengers": passengers
+        }, chat_id)
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении в избранное: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка при добавлении в избранное", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("fav_search_"))
+def on_favorite_search(call):
+    """Обработчик быстрого поиска по избранному маршруту"""
+    chat_id = call.message.chat.id
+    data = call.data.replace("fav_search_", "").split("_")
+    
+    if len(data) < 4:
+        bot.answer_callback_query(call.id, "Ошибка формата данных", show_alert=True)
+        return
+    
+    # Парсим данные: id_from_to_passengers
+    route_id = int(data[0])
+    passengers = int(data[-1])
+    to_station = data[-2]
+    from_station = "_".join(data[1:-2])  # Все между id и to_station
+    
+    logger.info(f"⭐ Пользователь {chat_id} запустил поиск по избранному: {from_station} → {to_station}")
+    
+    bot.answer_callback_query(call.id, f"🔍 Поиск: {from_station} → {to_station}")
+    
+    # Сохраняем в user_data и запускаем процесс поиска
+    user_data[chat_id] = {
+        'from': from_station,
+        'to': to_station,
+        'date': None,  # Дата будет выбрана через календарь
+        'passengers': passengers,
+        'favorite_route_id': route_id
+    }
+    
+    # Показываем календарь
+    calendar_result = calendar.get_calendar()
+    bot.send_message(
+        chat_id, 
+        f"📅 Выберите дату поездки для {from_station} → {to_station}:",
+        reply_markup=calendar_result
+    )
+
+@bot.callback_query_handler(func=lambda call: isinstance(call.data, str) and call.data.startswith("fav_delete_"))
+def on_delete_favorite(call):
+    """Обработчик удаления маршрута из избранного"""
+    chat_id = call.message.chat.id
+    data = call.data.replace("fav_delete_", "")
+    
+    try:
+        route_id = int(data)
+        if remove_favorite_route(chat_id, route_id):
+            bot.answer_callback_query(call.id, "✅ Маршрут удален из избранного", show_alert=True)
+            
+            # Обновляем сообщение со списком избранных
+            show_favorites(call.message)
+        else:
+            bot.answer_callback_query(call.id, "❌ Не удалось удалить маршрут", show_alert=True)
+    except ValueError:
+        bot.answer_callback_query(call.id, "Ошибка формата ID", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении из избранного: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка при удалении", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == "fav_add_new")
+def on_add_new_favorite(call):
+    """Обработчик добавления нового избранного маршрута"""
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    # Имитируем команду /track
+    call.message.text = "/track"
+    start_track(call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data == "refresh_stats")
+def on_refresh_stats(call):
+    """Обработчик обновления статистики"""
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id, "Обновление...")
+    show_user_stats(call.message)
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id, "🔁 Повторяю поиск...")
     
