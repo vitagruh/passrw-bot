@@ -200,7 +200,7 @@ def log_exception(logger_instance: logging.Logger, message: str = "Произо�
     
     # Запись в таблицу bot_errors для глобального мониторинга ошибок
     try:
-        with get_db_cursor() as cursor:
+        with get_db_cursor_locked() as cursor:
             cursor.execute("""
                 INSERT INTO bot_errors (error_type, error_message, stack_trace, chat_id, created_at)
                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -237,20 +237,27 @@ except Exception as e:
 # БАЗА ДАННЫХ (ПЕРСИСТЕНТНОЕ ХРАНИЛИЩЕ)
 # ============================================
 
+# Глобальная блокировка для синхронизации доступа к БД
+db_lock = threading.Lock()
+
 def get_db_connection():
     """Создает подключение к базе данных с поддержкой внешних ключей и таймаутом"""
-    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0, check_same_thread=False)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=60.0, check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # Устанавливаем режим WAL для лучшей поддержки конкурентного доступа
     conn.execute("PRAGMA journal_mode = WAL")
     # Устанавливаем busy_timeout (в миллисекундах)
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA busy_timeout = 60000")
+    # Увеличиваем размер кэша страниц
+    conn.execute("PRAGMA cache_size = -2000")
+    # Синхронизация - NORMAL для баланса между производительностью и надежностью
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 @contextmanager
 def get_db_cursor():
-    """Контекстный менеджер для работы с базой данных"""
+    """Контекстный менеджер для работы с базой данных с блокировкой для записи"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -263,6 +270,22 @@ def get_db_cursor():
     finally:
         conn.close()
 
+@contextmanager
+def get_db_cursor_locked():
+    """Контекстный менеджер с явной блокировкой для операций записи"""
+    with db_lock:
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            yield cursor
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"❌ Ошибка базы данных: {e}")
+            raise
+        finally:
+            conn.close()
+
 def init_database():
     """Инициализация таблиц базы данных"""
     # Создаем директорию для базы данных если не существует
@@ -270,7 +293,7 @@ def init_database():
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
     
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         # Таблица пользователей с ролевой моделью
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -430,7 +453,7 @@ def init_database():
 
 def save_user(chat_id: int, username: str = None, first_name: str = None, last_name: str = None, role: str = None):
     """Сохраняет или обновляет информацию о пользователе с поддержкой ролей"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         if role:
             cursor.execute("""
                 INSERT INTO users (chat_id, username, first_name, last_name, role, last_active)
@@ -467,7 +490,7 @@ def is_admin(chat_id: int) -> bool:
 
 def log_user_action(chat_id: int, action: str, details: str = ""):
     """Логирует действия пользователей в базу данных для админ-панели"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             INSERT INTO user_logs (chat_id, action, details, created_at)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -477,7 +500,7 @@ def save_tracking_to_db(chat_id: int, from_station: str, to_station: str,
                         date: str, passengers: int, train_time: str, 
                         heartbeat_enabled: bool = False, heartbeat_interval: int = 1800):
     """Сохраняет активный трекинг в базу данных"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             INSERT INTO active_trackings 
             (chat_id, from_station, to_station, date, passengers, train_time, 
@@ -488,7 +511,7 @@ def save_tracking_to_db(chat_id: int, from_station: str, to_station: str,
 
 def remove_tracking_from_db(chat_id: int, tracking_id: int = None, train_time: str = None):
     """Удаляет трекинг из базы данных по ID или train_time"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         if tracking_id:
             # Удаляем по уникальному ID (предпочтительный способ)
             cursor.execute("""
@@ -520,7 +543,7 @@ def get_user_trackings(chat_id: int) -> List[sqlite3.Row]:
 def update_tracking_status(chat_id: int, train_time: str, seats_available: int, 
                            train_num: str = None, requests_count: int = None):
     """Обновляет статус трекинга в базе данных"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         updates = []
         params = []
         
@@ -544,7 +567,7 @@ def update_tracking_status(chat_id: int, train_time: str, seats_available: int,
 def save_search_history(chat_id: int, from_station: str, to_station: str, 
                         date: str, passengers: int):
     """Сохраняет поиск в историю"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             INSERT INTO search_history 
             (chat_id, from_station, to_station, date, passengers)
@@ -552,7 +575,7 @@ def save_search_history(chat_id: int, from_station: str, to_station: str,
         """, (chat_id, from_station, to_station, date, passengers))
         
         # Обновляем статистику пользователя (+1 поиск)
-        update_user_stats(chat_id, searches_increment=1)
+        update_user_stats_locked(chat_id, searches_increment=1)
         
         # Обновляем счетчик использования станций
         for station in [from_station, to_station]:
@@ -592,7 +615,7 @@ def get_popular_stations(limit: int = 10) -> List[sqlite3.Row]:
 
 def save_favorite_route(chat_id: int, from_station: str, to_station: str, passengers: int = 1):
     """Сохраняет маршрут в избранные"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             INSERT INTO favorite_routes (chat_id, from_station, to_station, passengers)
             VALUES (?, ?, ?, ?)
@@ -611,7 +634,7 @@ def get_user_favorite_routes(chat_id: int) -> List[sqlite3.Row]:
 
 def remove_favorite_route(chat_id: int, route_id: int) -> bool:
     """Удаляет маршрут из избранных"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             DELETE FROM favorite_routes 
             WHERE id = ? AND chat_id = ?
@@ -622,8 +645,32 @@ def remove_favorite_route(chat_id: int, route_id: int) -> bool:
         return deleted
 
 def update_user_stats(chat_id: int, searches_increment: int = 0, bookings_increment: int = 0, savings: float = 0.0):
-    """Обновляет статистику пользователя"""
+    """Обновляет статистику пользователя (без блокировки - для внутреннего использования)"""
     with get_db_cursor() as cursor:
+        # Сначала проверяем, есть ли запись
+        cursor.execute("SELECT chat_id FROM user_stats WHERE chat_id = ?", (chat_id,))
+        exists = cursor.fetchone()
+        
+        if exists:
+            cursor.execute("""
+                UPDATE user_stats 
+                SET total_searches = total_searches + ?,
+                    successful_bookings = successful_bookings + ?,
+                    total_savings = total_savings + ?,
+                    last_stats_update = CURRENT_TIMESTAMP
+                WHERE chat_id = ?
+            """, (searches_increment, bookings_increment, savings, chat_id))
+        else:
+            cursor.execute("""
+                INSERT INTO user_stats (chat_id, total_searches, successful_bookings, total_savings)
+                VALUES (?, ?, ?, ?)
+            """, (chat_id, searches_increment, bookings_increment, savings))
+        
+        logger.info(f"📊 Статистика пользователя {chat_id} обновлена: +{searches_increment} поисков, +{bookings_increment} бронирований, +{savings} BYN savings")
+
+def update_user_stats_locked(chat_id: int, searches_increment: int = 0, bookings_increment: int = 0, savings: float = 0.0):
+    """Обновляет статистику пользователя с блокировкой (для вызова извне)"""
+    with get_db_cursor_locked() as cursor:
         # Сначала проверяем, есть ли запись
         cursor.execute("SELECT chat_id FROM user_stats WHERE chat_id = ?", (chat_id,))
         exists = cursor.fetchone()
@@ -687,7 +734,7 @@ def is_feature_enabled(flag_name: str, chat_id: int = None) -> bool:
 
 def set_feature_flag(flag_name: str, is_enabled: bool, description: str = ""):
     """Устанавливает значение feature flag (используется в админ-панели)"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             INSERT INTO feature_flags (flag_name, is_enabled, description, updated_at)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -709,7 +756,7 @@ def get_all_feature_flags() -> List[sqlite3.Row]:
 
 def log_webhook_event(event_type: str, payload: Dict, chat_id: int = None):
     """Логгирует событие для webhook интеграции"""
-    with get_db_cursor() as cursor:
+    with get_db_cursor_locked() as cursor:
         cursor.execute("""
             INSERT INTO webhook_events (event_type, payload, chat_id)
             VALUES (?, ?, ?)
