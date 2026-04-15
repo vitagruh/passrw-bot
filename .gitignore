@@ -1,1 +1,1 @@
-Nothing should be ignored based on the provided file changes, as only a Python source file (`ticket_bot.py`) was modified without any build artifacts, dependencies, or temporary files being added.
+.env
