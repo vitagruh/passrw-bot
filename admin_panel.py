@@ -440,6 +440,71 @@ def get_statistics() -> Dict[str, Any]:
         """)
         top_routes = cursor.fetchall()
         
+        # === СТАТИСТИКА ЛОГОВ И ОШИБОК ===
+        
+        # Общее количество логов действий пользователей
+        cursor.execute("SELECT COUNT(*) FROM user_logs")
+        total_user_logs = cursor.fetchone()[0]
+        
+        # Логи за последние 24 часа
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_logs 
+            WHERE created_at >= datetime('now', '-1 day')
+        """)
+        logs_24h = cursor.fetchone()[0]
+        
+        # Топ действий пользователей
+        cursor.execute("""
+            SELECT action, COUNT(*) as count
+            FROM user_logs
+            GROUP BY action
+            ORDER BY count DESC
+            LIMIT 10
+        """)
+        top_actions = cursor.fetchall()
+        
+        # Статистика ошибок бота
+        cursor.execute("SELECT COUNT(*) FROM bot_errors")
+        total_bot_errors = cursor.fetchone()[0]
+        
+        # Ошибки за последние 24 часа
+        cursor.execute("""
+            SELECT COUNT(*) FROM bot_errors 
+            WHERE created_at >= datetime('now', '-1 day')
+        """)
+        errors_24h = cursor.fetchone()[0]
+        
+        # Топ типов ошибок
+        cursor.execute("""
+            SELECT error_type, COUNT(*) as count
+            FROM bot_errors
+            GROUP BY error_type
+            ORDER BY count DESC
+            LIMIT 10
+        """)
+        top_error_types = cursor.fetchall()
+        
+        # Последние ошибки (для превью)
+        cursor.execute("""
+            SELECT id, error_type, error_message, created_at, chat_id
+            FROM bot_errors
+            ORDER BY created_at DESC
+            LIMIT 5
+        """)
+        recent_errors_preview = cursor.fetchall()
+        
+        # Ошибки по пользователям (топ)
+        cursor.execute("""
+            SELECT u.chat_id, u.username, COUNT(be.id) as error_count
+            FROM users u
+            LEFT JOIN bot_errors be ON u.chat_id = be.chat_id
+            GROUP BY u.chat_id
+            HAVING error_count > 0
+            ORDER BY error_count DESC
+            LIMIT 5
+        """)
+        users_with_most_errors = cursor.fetchall()
+        
         # Ошибки парсинга из монитора системы
         system_stats = system_monitor.get_statistics()
         
@@ -460,6 +525,15 @@ def get_statistics() -> Dict[str, Any]:
             'new_users_7d': new_users_7d,
             'avg_tracking_age': avg_tracking_age,
             'top_routes': top_routes,
+            # Статистика логов и ошибок
+            'total_user_logs': total_user_logs,
+            'logs_24h': logs_24h,
+            'top_actions': top_actions,
+            'total_bot_errors': total_bot_errors,
+            'errors_24h': errors_24h,
+            'top_error_types': top_error_types,
+            'recent_errors_preview': recent_errors_preview,
+            'users_with_most_errors': users_with_most_errors,
             'system_monitor': system_stats
         }
 
@@ -513,6 +587,47 @@ def get_user_logs(limit: int = 100, chat_id: int = None) -> List[sqlite3.Row]:
                 FROM user_logs ul
                 JOIN users u ON ul.chat_id = u.chat_id
                 ORDER BY ul.created_at DESC
+                LIMIT ?
+            """, (limit,))
+        return cursor.fetchall()
+
+
+def get_bot_errors(limit: int = 100, error_type: str = None, chat_id: int = None) -> List[sqlite3.Row]:
+    """Получить ошибки бота с фильтрацией по типу и chat_id"""
+    with get_db_cursor() as cursor:
+        if error_type and chat_id:
+            cursor.execute("""
+                SELECT be.*, u.username, u.first_name
+                FROM bot_errors be
+                LEFT JOIN users u ON be.chat_id = u.chat_id
+                WHERE be.error_type = ? AND be.chat_id = ?
+                ORDER BY be.created_at DESC
+                LIMIT ?
+            """, (error_type, chat_id, limit))
+        elif error_type:
+            cursor.execute("""
+                SELECT be.*, u.username, u.first_name
+                FROM bot_errors be
+                LEFT JOIN users u ON be.chat_id = u.chat_id
+                WHERE be.error_type = ?
+                ORDER BY be.created_at DESC
+                LIMIT ?
+            """, (error_type, limit))
+        elif chat_id:
+            cursor.execute("""
+                SELECT be.*, u.username, u.first_name
+                FROM bot_errors be
+                LEFT JOIN users u ON be.chat_id = u.chat_id
+                WHERE be.chat_id = ?
+                ORDER BY be.created_at DESC
+                LIMIT ?
+            """, (chat_id, limit))
+        else:
+            cursor.execute("""
+                SELECT be.*, u.username, u.first_name
+                FROM bot_errors be
+                LEFT JOIN users u ON be.chat_id = u.chat_id
+                ORDER BY be.created_at DESC
                 LIMIT ?
             """, (limit,))
         return cursor.fetchall()
@@ -1720,16 +1835,26 @@ def admin_logs():
     """Логи действий администраторов и пользователей"""
     admin_logs_list = get_admin_logs(50)
     user_logs_list = get_user_logs(50)
+    bot_errors_list = get_bot_errors(50)
     
-    # Получаем chat_id для фильтрации (если указан)
+    # Получаем параметры для фильтрации
     filter_chat_id = request.args.get('chat_id', type=int)
+    filter_error_type = request.args.get('error_type', type=str)
+    
     if filter_chat_id:
         user_logs_list = get_user_logs(50, chat_id=filter_chat_id)
+        bot_errors_list = get_bot_errors(50, chat_id=filter_chat_id)
+    
+    if filter_error_type:
+        bot_errors_list = get_bot_errors(50, error_type=filter_error_type)
     
     return render_template_string(LOGS_TEMPLATE, 
                                   admin_logs=admin_logs_list, 
                                   user_logs=user_logs_list,
-                                  filter_chat_id=filter_chat_id)
+                                  bot_errors=bot_errors_list,
+                                  filter_chat_id=filter_chat_id,
+                                  filter_error_type=filter_error_type)
+
 
 
 @app.route('/users')

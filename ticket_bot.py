@@ -140,6 +140,7 @@ def get_user_profile_info(message) -> str:
 def log_action(message, action: str, details: str = ""):
     """
     Единая функция логирования действий пользователя с расширенной информацией.
+    Также записывает действие в базу данных для отображения в админ-панели.
     
     :param message: Объект сообщения или callback query
     :param action: Тип действия (START, SEARCH, ERROR, XSS_ATTEMPT и т.д.)
@@ -169,13 +170,44 @@ def log_action(message, action: str, details: str = ""):
         logger.error(f"❌ {log_entry}")
     else:
         logger.info(f"ℹ️ {log_entry}")
+    
+    # Запись в базу данных для админ-панели (если chat_id числовой)
+    if isinstance(chat_id, int):
+        try:
+            log_user_action(chat_id, action, details)
+        except Exception as e:
+            logger.error(f"Ошибка записи лога в БД: {e}")
 
 
-def log_exception(logger_instance: logging.Logger, message: str = "Произошла ошибка"):
+def log_exception(logger_instance: logging.Logger, message: str = "Произошла ошибка", chat_id: int = None):
     """
     Вспомогательная функция для логирования исключений с полным traceback.
+    Также записывает ошибку в базу данных для отображения в админ-панели.
+    
+    :param logger_instance: Экземпляр логгера
+    :param message: Сообщение об ошибке
+    :param chat_id: ID пользователя (опционально, для привязки к пользователю)
     """
-    logger_instance.error(f"{message}: {traceback.format_exc()}")
+    error_traceback = traceback.format_exc()
+    logger_instance.error(f"{message}: {error_traceback}")
+    
+    # Запись ошибки в базу данных для админ-панели
+    if chat_id is not None and isinstance(chat_id, int):
+        try:
+            log_user_action(chat_id, f"ERROR: {message}", error_traceback[:500])  # Ограничиваем длину
+        except Exception as e:
+            logger_instance.error(f"Ошибка записи исключения в БД: {e}")
+    
+    # Запись в таблицу bot_errors для глобального мониторинга ошибок
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO bot_errors (error_type, error_message, stack_trace, chat_id, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (message.split(':')[0], message, error_traceback[:2000], chat_id))
+    except Exception as e:
+        logger_instance.error(f"Ошибка записи в таблицу bot_errors: {e}")
+
 
 # --- ЗАГРУЗКА .ENV ---
 load_dotenv()
@@ -355,6 +387,19 @@ def init_database():
             )
         """)
         
+        # Таблица ошибок бота (для мониторинга в админ-панели)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                error_type TEXT NOT NULL,
+                error_message TEXT,
+                stack_trace TEXT,
+                chat_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (chat_id) REFERENCES users(chat_id) ON DELETE SET NULL
+            )
+        """)
+        
         # Индексы для ускорения поиска
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trackings_chat ON active_trackings(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_chat ON search_history(chat_id)")
@@ -363,6 +408,9 @@ def init_database():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_feature_flags_name ON feature_flags(flag_name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_logs_chat ON user_logs(chat_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_logs_created ON user_logs(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bot_errors_type ON bot_errors(error_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bot_errors_created ON bot_errors(created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bot_errors_chat ON bot_errors(chat_id)")
         
         # Инициализация default feature flags
         cursor.execute("""
