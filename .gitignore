@@ -1,1 +1,4 @@
-Nothing needs to be added to .gitignore since only a Python source file (`admin_panel.py`) was modified and there are no build artifacts, dependencies, or temporary files in the changes.
+```
+__pycache__/
+*.pyc
+```
