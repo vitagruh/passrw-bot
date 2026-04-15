@@ -238,10 +238,14 @@ except Exception as e:
 # ============================================
 
 def get_db_connection():
-    """Создает подключение к базе данных с поддержкой внешних ключей"""
-    conn = sqlite3.connect(DATABASE_PATH)
+    """Создает подключение к базе данных с поддержкой внешних ключей и таймаутом"""
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Устанавливаем режим WAL для лучшей поддержки конкурентного доступа
+    conn.execute("PRAGMA journal_mode = WAL")
+    # Устанавливаем busy_timeout (в миллисекундах)
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 @contextmanager
