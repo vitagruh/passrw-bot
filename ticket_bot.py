@@ -574,8 +574,23 @@ def save_search_history(chat_id: int, from_station: str, to_station: str,
             VALUES (?, ?, ?, ?, ?)
         """, (chat_id, from_station, to_station, date, passengers))
         
-        # Обновляем статистику пользователя (+1 поиск)
-        update_user_stats_locked(chat_id, searches_increment=1)
+        # Обновляем статистику пользователя (+1 поиск) - напрямую, без вызова update_user_stats_locked
+        # (чтобы избежать deadlock, т.к. мы уже внутри блокировки)
+        cursor.execute("SELECT chat_id FROM user_stats WHERE chat_id = ?", (chat_id,))
+        exists = cursor.fetchone()
+
+        if exists:
+            cursor.execute("""
+                UPDATE user_stats
+                SET total_searches = total_searches + 1,
+                    last_stats_update = CURRENT_TIMESTAMP
+                WHERE chat_id = ?
+            """, (chat_id,))
+        else:
+            cursor.execute("""
+                INSERT INTO user_stats (chat_id, total_searches, successful_bookings, total_savings)
+                VALUES (?, 1, 0, 0)
+            """, (chat_id,))
         
         # Обновляем счетчик использования станций
         for station in [from_station, to_station]:
@@ -1526,7 +1541,7 @@ def show_my_trackings(message):
         text += f"   👥 Мест: {tracking['passengers']} | Доступно: {tracking['seats_available']}\n"
         text += f"   💓 Heartbeat: {'вкл' if tracking['heartbeat_enabled'] else 'выкл'}\n"
         text += f"   🔁 Запросов: {tracking['requests_count']}\n"
-        text += f"   ⏰ Создан: {created_at}\n\n"
+        #text += f"   ⏰ Создан: {created_at}\n\n" Отображает время в UTC
         
         # Кнопка удаления с номером трекинга для удобства
         btn_text = f"❌ Удалить трек №{i} ({tracking['from_station']} → {tracking['to_station']})"
