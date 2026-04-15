@@ -2340,56 +2340,7 @@ def on_refresh_stats(call):
     """Обработчик обновления статистики"""
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id, "Обновление...")
-    show_user_stats(call.message)
-    chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id, "🔁 Повторяю поиск...")
-    
-    try:
-        # Разбираем callback_data: repeat_search_FROM_TO_DATE_PASSENGERS
-        parts = call.data.replace("repeat_search_", "").split("_")
-        if len(parts) >= 4:
-            # Последние два элемента - дата и пассажиры
-            passengers = parts[-1]
-            date = parts[-2]
-            # Всё остальное - станции (могут содержать подчеркивания)
-            station_parts = parts[:-2]
-            # Предполагаем, что первая половина - from, вторая - to
-            mid = len(station_parts) // 2
-            from_station = "_".join(station_parts[:mid])
-            to_station = "_".join(station_parts[mid:])
-            
-            # Заменяем подчеркивания на пробелы в названиях станций
-            from_station = from_station.replace("_", " ")
-            to_station = to_station.replace("_", " ")
-            
-            logger.info(f"🔁 Повтор поиска: {from_station} → {to_station} | {date} | {passengers}")
-            
-            # Сохраняем данные и начинаем поиск
-            user_data[chat_id] = {
-                'from': from_station,
-                'to': to_station,
-                'date': date,
-                'passengers': int(passengers)
-            }
-            
-            loading_msg = bot.send_message(
-                chat_id, 
-                f"🔍 Ищу поезда по маршруту {from_station} → {to_station} на {date}..."
-            )
-            
-            trains = get_trains_list(from_station, to_station, date, chat_id)
-            bot.delete_message(chat_id, loading_msg.message_id)
-            
-            if not trains:
-                bot.send_message(chat_id, "❌ Поездов не найдено. Попробуйте другую дату или маршрут.")
-                return
-            
-            show_train_list(chat_id, trains)
-        else:
-            bot.send_message(chat_id, "❌ Ошибка при разборе данных поиска. Используйте /history заново.")
-    except Exception as e:
-        logger.error(f"Ошибка повтора поиска: {e}")
-        bot.send_message(chat_id, f"❌ Ошибка: {e}. Попробуйте начать поиск через /track")
+    show_user_stats_impl(call.message, chat_id)
 
 @bot.message_handler(func=lambda message: message.text in ["🚂 Начать поиск", "Начать поиск"])
 def on_start_search_button(message):
