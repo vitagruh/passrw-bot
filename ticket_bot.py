@@ -2370,6 +2370,20 @@ def on_help_button(message):
     logger.info(f"Пользователь {chat_id} нажал кнопку 'Помощь'")
     show_help(message)
 
+@bot.message_handler(func=lambda message: message.text in ["⭐ Избранное", "Избранное"])
+def on_favorites_button(message):
+    """Обработчик кнопки 'Избранное' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Избранное'")
+    show_favorites_impl(message, chat_id)
+
+@bot.message_handler(func=lambda message: message.text in ["📈 Моя статистика", "Моя статистика"])
+def on_user_stats_button(message):
+    """Обработчик кнопки 'Моя статистика' из главного меню"""
+    chat_id = message.chat.id
+    logger.info(f"Пользователь {chat_id} нажал кнопку 'Моя статистика'")
+    show_user_stats_impl(message, chat_id)
+
 @bot.message_handler(func=lambda message: message.text == "🔙 Назад")
 def on_back_button(message):
     """Обработчик кнопки 'Назад' - сбрасывает текущий шаг"""
