@@ -1469,11 +1469,131 @@ SEND_MESSAGE_TEMPLATE = BASE_TEMPLATE.replace(
 LOGS_TEMPLATE = BASE_TEMPLATE.replace(
     '{% block content %}{% endblock %}',
     '''
-    <h2><i class="bi bi-journal-text"></i> Логи действий администратора</h2>
+    <h2><i class="bi bi-journal-text"></i> Логи и мониторинг</h2>
     <hr>
     
-    <div class="card">
+    <!-- Фильтры -->
+    <div class="card mb-3">
         <div class="card-body">
+            <form method="GET" action="{{ url_for('admin_logs') }}" class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">Фильтр по User ID</label>
+                    <input type="number" name="chat_id" class="form-control" 
+                           value="{{ filter_chat_id or '' }}" placeholder="Chat ID">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Фильтр по типу ошибки</label>
+                    <input type="text" name="error_type" class="form-control" 
+                           value="{{ filter_error_type or '' }}" placeholder="Тип ошибки">
+                </div>
+                <div class="col-md-4 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary me-2">
+                        <i class="bi bi-funnel"></i> Применить фильтры
+                    </button>
+                    <a href="{{ url_for('admin_logs') }}" class="btn btn-secondary">
+                        <i class="bi bi-x-circle"></i> Сбросить
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Логи действий пользователей -->
+    <div class="card mb-4">
+        <div class="card-header bg-primary text-white">
+            <i class="bi bi-person-activity"></i> Активность пользователей ({{ user_logs|length }})
+        </div>
+        <div class="card-body">
+            {% if user_logs %}
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>User ID</th>
+                            <th>Пользователь</th>
+                            <th>Действие</th>
+                            <th>Детали</th>
+                            <th>Время</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for log in user_logs %}
+                        <tr>
+                            <td>{{ log.id }}</td>
+                            <td><code>{{ log.chat_id }}</code></td>
+                            <td>
+                                {% if log.username %}@{{ log.username }}{% else %}-{% endif %}<br>
+                                <small class="text-muted">{{ log.first_name or '' }}</small>
+                            </td>
+                            <td><span class="badge bg-info">{{ log.action }}</span></td>
+                            <td><small>{{ log.details[:100] }}{{ '...' if log.details|length > 100 else '' }}</small></td>
+                            <td><small>{{ log.created_at }}</small></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted">Нет записей в логах пользователей</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- Ошибки бота -->
+    <div class="card mb-4">
+        <div class="card-header bg-danger text-white">
+            <i class="bi bi-bug"></i> Ошибки бота ({{ bot_errors|length }})
+        </div>
+        <div class="card-body">
+            {% if bot_errors %}
+            <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Тип</th>
+                            <th>Сообщение</th>
+                            <th>User ID</th>
+                            <th>Пользователь</th>
+                            <th>Время</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for error in bot_errors %}
+                        <tr>
+                            <td>{{ error.id }}</td>
+                            <td><span class="badge bg-danger">{{ error.error_type }}</span></td>
+                            <td>
+                                <small>{{ error.error_message[:80] }}{{ '...' if error.error_message|length > 80 else '' }}</small><br>
+                                <details>
+                                    <summary class="text-muted" style="cursor:pointer;">Показать стек</summary>
+                                    <pre class="bg-light p-2 mt-1"><code>{{ error.stack_trace[:500] }}{{ '...' if error.stack_trace|length > 500 else '' }}</code></pre>
+                                </details>
+                            </td>
+                            <td>{% if error.chat_id %}<code>{{ error.chat_id }}</code>{% else %}-{% endif %}</td>
+                            <td>
+                                {% if error.username %}@{{ error.username }}{% else %}-{% endif %}
+                            </td>
+                            <td><small>{{ error.created_at }}</small></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-success"><i class="bi bi-check-circle"></i> Ошибок не найдено</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    <!-- Логи действий администратора -->
+    <div class="card">
+        <div class="card-header bg-warning">
+            <i class="bi bi-shield-lock"></i> Логи администратора ({{ admin_logs|length }})
+        </div>
+        <div class="card-body">
+            {% if admin_logs %}
             <div class="table-responsive">
                 <table class="table table-sm table-hover">
                     <thead>
@@ -1487,7 +1607,7 @@ LOGS_TEMPLATE = BASE_TEMPLATE.replace(
                         </tr>
                     </thead>
                     <tbody>
-                        {% for log in logs %}
+                        {% for log in admin_logs %}
                         <tr>
                             <td>{{ log.id }}</td>
                             <td>{{ log.admin_username }}</td>
@@ -1500,6 +1620,9 @@ LOGS_TEMPLATE = BASE_TEMPLATE.replace(
                     </tbody>
                 </table>
             </div>
+            {% else %}
+            <p class="text-muted">Нет записей в логах администратора</p>
+            {% endif %}
         </div>
     </div>
     '''
