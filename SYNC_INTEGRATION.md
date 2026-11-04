@@ -26,7 +26,7 @@
 
 **Механизмы синхронизации:**
 1. **SQLite таблица `sync_flags`** - хранит флаги действий между процессами
-2. **Файлы-флаги в `/tmp/ticket_bot_sync/`** - для мгновенной реакции (IPC)
+2. **Файлы-флаги в `SYNC_DIR`** (по умолчанию `data/sync/`) - для мгновенной реакции (IPC)
 3. **ACID транзакции** - гарантируют консистентность данных
 
 #### 2. Изменения в `ticket_bot.py`
@@ -137,7 +137,7 @@ def delete_tracking(tracking_id):
    - Пользователь нажимает "Удалить трекинг"
    - Вызывается `request_tracking_stop(chat_id, train_time)`
    - Создается запись в таблице `sync_flags`
-   - Создается файл-флаг `/tmp/ticket_bot_sync/stop_{chat_id}_{train_time}.flag`
+   - Создается файл-флаг `data/sync/stop_{tracking_id}.flag` (для старых записей также поддерживается `stop_{chat_id}_{train_time}.flag`)
 
 2. **Ticket-bot:**
    - В следующем цикле `tracking_worker` вызывает `check_stop_request()`

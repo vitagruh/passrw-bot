@@ -22,7 +22,7 @@ import db
 logger = logging.getLogger('TrackingSync')
 logger.setLevel(logging.INFO)
 
-SYNC_DIR = Path(os.getenv("SYNC_DIR", "/tmp/ticket_bot_sync"))
+SYNC_DIR = Path(os.getenv("SYNC_DIR", "data/sync"))
 DATABASE_PATH = db.DATABASE_PATH
 
 

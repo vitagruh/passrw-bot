@@ -5,7 +5,7 @@
 ## Возможности
 
 - Пошаговый поиск: станция отправления → назначение → дата (inline-календарь) → пассажиры.
-- Подсказки станций по мере ввода и защита от опечаток.
+- Подсказки станций после ввода названия (inline-кнопки) и защита от опечаток.
 - Мультитрекинг: до 5 поездов на пользователя, каждый со своим потоком и heartbeat.
 - Умные уведомления: дедупликация, повтор только при изменении мест/цены, cooldown.
 - Настройки пользователя (`/settings`):
@@ -20,7 +20,8 @@
 - Админ-панель: трекинги, пользователи, статистика, CSV-экспорт, мониторинг, heartbeat.
 - Безопасность: CSRF, rate limiting входа, блокировка после неудачных попыток, session timeout, IP whitelist, хеш пароля, CSV-injection защита.
 - Служебные эндпоинты `/healthz` и `/metrics` (Prometheus).
-- Автоочистка логов/истории и восстановление трекингов после перезапуска.
+- Автоочистка записей логов в БД и истории по `RETENTION_DAYS`, ротация `bot.log` и `error.log`.
+- Восстановление активных трекингов после перезапуска.
 
 ## Требования
 
@@ -38,7 +39,7 @@
 ```powershell
 git clone https://github.com/vitagruh/passrw-bot.git
 cd passrw-bot
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -54,7 +55,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 В `cmd.exe` активация выглядит иначе:
 
 ```bat
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\activate.bat
 pip install -r requirements.txt
 copy .env.example .env
@@ -162,21 +163,28 @@ python admin_panel.py    # админка: http://127.0.0.1:5000
 | Переменная | Назначение | По умолчанию |
 |---|---|---|
 | `TELEGRAM_TOKEN` | Токен бота | обязателен |
-| `CHECK_INTERVAL` | Интервал проверки, сек | `60` |
+| `CHECK_INTERVAL` | Интервал проверки, сек (не менее 10) | `60` |
+| `HTTP_CACHE_TTL` | Кеш запросов к pass.rw.by, сек (`0` — выключить) | `30` |
+| `REQUEST_TIMEOUT` | Таймаут запроса к сайту, сек | `15` |
+| `MAX_PASSENGERS` | Максимум пассажиров в поиске | `9` |
 | `MAX_TRACKINGS_PER_USER` | Лимит трекингов | `5` |
 | `NOTIFY_COOLDOWN` | Пауза между уведомлениями, сек | `300` |
 | `STOP_ON_SUCCESS` | Останавливать трекинг после находки | `true` |
-| `MAINTENANCE_INTERVAL` | Период очистки БД, сек | `21600` |
-| `RETENTION_DAYS` | Срок хранения логов/истории, дни | `30` |
+| `MAINTENANCE_INTERVAL` | Период очистки БД, сек (не менее 300) | `21600` |
+| `RETENTION_DAYS` | Срок хранения записей логов/истории, дни | `30` |
 | `LOCAL_TIMEZONE` | Часовой пояс вывода | `Europe/Minsk` |
 | `DATABASE_PATH` | Путь к SQLite | `data/ticket_bot.db` |
+| `SYNC_DIR` | Каталог флагов мягкой остановки | `data/sync` |
 | `ADMIN_USERNAME` | Логин админки | `admin` |
 | `ADMIN_PASSWORD` / `ADMIN_PASSWORD_HASH` | Пароль или его хеш | вход запрещён |
-| `SECRET_KEY` | Ключ сессий Flask | временный |
+| `SECRET_KEY` | Ключ сессий Flask | временный, генерируется при старте |
+| `FLASK_HOST` / `FLASK_PORT` | Адрес и порт админки | `127.0.0.1` / `5000` |
+| `SESSION_COOKIE_SECURE` | Только HTTPS-cookie (за reverse proxy) | `false` |
 | `SESSION_TIMEOUT_MINUTES` | Авто-logout | `60` |
 | `LOGIN_MAX_ATTEMPTS` / `LOGIN_LOCKOUT_SECONDS` | Защита входа | `5` / `900` |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW` | Лимит запросов к админке | `100` / `60` |
 | `IP_WHITELIST` | Разрешённые IP через запятую | без ограничений |
-| `METRICS_TOKEN` | Токен для `/metrics` | без токена |
+| `METRICS_TOKEN` | Токен для `/metrics` | публичный |
 
 ## Тесты и CI
 
@@ -248,7 +256,7 @@ curl http://127.0.0.1:5000/healthz
 curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:5000/metrics
 ```
 
-`/healthz` публичный и возвращает `503`, если БД недоступна. `/metrics` без `METRICS_TOKEN` отвечает `403`.
+`/healthz` публичный и возвращает `503`, если БД недоступна. Если `METRICS_TOKEN` задан, запрос к `/metrics` без заголовка `Authorization: Bearer ...` получает `403`; если токен не задан, метрики публичны.
 
 ### Обслуживание
 
@@ -266,6 +274,8 @@ docker compose down              # остановить и удалить кон
 ```bash
 docker compose config
 ```
+
+Команда печатает переменные окружения, включая секреты из `.env`, — не публикуйте её вывод.
 
 ### Безопасность
 
@@ -293,8 +303,11 @@ docker compose config
 ├── requirements-dev.txt
 ├── Dockerfile
 ├── docker-compose.yml
+├── .dockerignore
+├── .github/workflows/ci.yml  # pytest + pyflakes на Python 3.11–3.13
 ├── .env.example
-├── data/                  # SQLite (создаётся автоматически)
+├── LICENSE
+├── data/                  # SQLite и sync/ (создаётся автоматически)
 ├── logs/                  # логи (создаётся автоматически)
 └── tests/                 # pytest
 ```

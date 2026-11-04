@@ -143,7 +143,7 @@ python admin_panel.py
 | `LOGIN_MAX_ATTEMPTS` | Попыток входа до блокировки | `5` |
 | `LOGIN_LOCKOUT_SECONDS` | Длительность блокировки входа | `900` |
 | `IP_WHITELIST` | Список разрешённых IP через запятую | без ограничений |
-| `METRICS_TOKEN` | Токен для `/metrics` | без токена |
+| `METRICS_TOKEN` | Токен для `/metrics` | публичный, если не задан |
 
 ## ⚠️ Production рекомендации
 
