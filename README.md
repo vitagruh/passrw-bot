@@ -190,12 +190,96 @@ python -m pyflakes ticket_bot.py admin_panel.py tracking_sync.py db.py tests
 
 ## Docker
 
+### Требования
+
+- Docker Engine 24+ и Docker Compose v2 (`docker compose`, не устаревший `docker-compose`).
+- Свободный порт `5000` на localhost (его занимает админка).
+- Реальный `TELEGRAM_TOKEN`: с фиктивным токеном контейнер бота завершится с ошибкой 401.
+
+### Подготовка
+
 ```bash
-cp .env.example .env   # заполните секреты
-docker compose up -d --build
+cp .env.example .env
+chmod 600 .env          # Linux/macOS; на Windows настройте ACL
 ```
 
-`docker-compose.yml` поднимает бота и админку, общий volume для `data/` и `logs/`. Админка проброшена только на `127.0.0.1:5000` — наружу публикуйте через reverse proxy с HTTPS.
+Заполните в `.env` как минимум:
+
+```env
+TELEGRAM_TOKEN=токен_от_BotFather
+ADMIN_PASSWORD_HASH=...   # или ADMIN_PASSWORD
+SECRET_KEY=случайная_hex_строка
+METRICS_TOKEN=...          # желательно, если /metrics доступен не только локально
+```
+
+Файл `.env` не попадает в образ (исключён в `.dockerignore`) и передаётся контейнерам через `env_file`.
+
+### Запуск
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+`docker-compose.yml` описывает два сервиса:
+
+| Сервис | Команда | Порты | Назначение |
+|---|---|---|---|
+| `bot` | `python ticket_bot.py` | — | опрос Telegram и трекинги |
+| `admin` | `python admin_panel.py` | `127.0.0.1:5000` | Flask-админка (waitress) |
+
+Оба сервиса собираются из одного `Dockerfile` (`python:3.12-slim`) и работают от непривилегированного пользователя `appuser` (uid 10001).
+
+### Данные и логи
+
+| Volume | Точка монтирования | Содержимое |
+|---|---|---|
+| `bot_data` | `/app/data` | `ticket_bot.db`, каталог `sync/` |
+| `bot_logs` | `/app/logs` | `bot.log`, `error.log`, `admin.log` |
+
+Volume сохраняются между перезапусками и пересборками. Команда `docker compose down -v` **удаляет их вместе с базой и историей трекингов** — используйте её только осознанно.
+
+### Проверка состояния
+
+```bash
+curl http://127.0.0.1:5000/healthz
+# {"db":"ok","status":"ok","trackings":0,"uptime_seconds":...,"users":0}
+
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:5000/metrics
+```
+
+`/healthz` публичный и возвращает `503`, если БД недоступна. `/metrics` без `METRICS_TOKEN` отвечает `403`.
+
+### Обслуживание
+
+```bash
+docker compose logs -f bot       # логи бота
+docker compose logs -f admin     # логи админки
+docker compose restart admin     # перезапуск одного сервиса
+git pull && docker compose up -d --build   # обновление
+docker compose stop              # остановить без удаления контейнеров
+docker compose down              # остановить и удалить контейнеры (volume остаются)
+```
+
+Проверить итоговую конфигурацию без запуска:
+
+```bash
+docker compose config
+```
+
+### Безопасность
+
+- Админка слушает только `127.0.0.1`; наружу публикуйте через nginx/Caddy с HTTPS.
+- Задайте `METRICS_TOKEN`, если метрики читает внешняя система.
+- Не передавайте секреты через `docker build --build-arg` и не копируйте `.env` в образ.
+- Контейнеры не используют `privileged` и root; не добавляйте лишние capabilities.
+
+### Если что-то не работает
+
+- **Бот перезапускается с ошибкой 401** — неверный или отозванный `TELEGRAM_TOKEN`; проверьте `docker compose logs bot`.
+- **`port is already allocated`** — порт 5000 занят; освободите его или измените проброс в `docker-compose.yml`.
+- **Админка долго в статусе `health: starting`** — healthcheck выполняется раз в 30 секунд, подождите до минуты.
+- **`database is locked`** — не запускайте несколько контейнеров бота на одном volume; SQLite работает в WAL, но один писатель должен быть один.
 
 ## Структура
 
