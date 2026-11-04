@@ -16,11 +16,13 @@ pip install -r requirements.txt
 
 ```env
 # Настройки админ-панели
-ADMIN_USERNAME=admin              # Имя пользователя для входа
-ADMIN_PASSWORD=your_secure_password  # Пароль (смените в production!)
-SECRET_KEY=your_random_secret_key    # Секретный ключ для сессий
-FLASK_HOST=127.0.0.1                 # Хост для запуска
-FLASK_PORT=5000                      # Порт веб-интерфейса
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your_secure_password   # либо ADMIN_PASSWORD_HASH (рекомендуется)
+# ADMIN_PASSWORD_HASH=...             # python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('пароль'))"
+SECRET_KEY=your_random_secret_key     # python -c "import secrets; print(secrets.token_hex(32))"
+FLASK_HOST=127.0.0.1                  # Хост для запуска
+FLASK_PORT=5000                       # Порт веб-интерфейса
+# METRICS_TOKEN=...                   # опциональная защита /metrics
 ```
 
 ### 3. Запуск админ-панели
@@ -29,14 +31,16 @@ FLASK_PORT=5000                      # Порт веб-интерфейса
 python admin_panel.py
 ```
 
-Откройте браузер и перейдите по адресу: `http://127.0.0.1:5000`
+Админка запускается через production WSGI-сервер waitress. Откройте браузер и перейдите по адресу: `http://127.0.0.1:5000`
 
 ## 🔐 Вход в систему
 
 - **Логин:** `admin` (или значение из `ADMIN_USERNAME`)
-- **Пароль:** `***REMOVED***` (или значение из `ADMIN_PASSWORD`)
+- **Пароль:** значение `ADMIN_PASSWORD` (или пароль от `ADMIN_PASSWORD_HASH`)
 
-⚠️ **Важно:** Смените пароль перед использованием в production!
+⚠️ **Важно:** Пароля по умолчанию нет — без `ADMIN_PASSWORD`/`ADMIN_PASSWORD_HASH` админка не запустится. Смените пароль перед использованием в production.
+
+Служебные эндпоинты: `/healthz` (проверка БД) и `/metrics` (Prometheus; при заданном `METRICS_TOKEN` требуется `Authorization: Bearer <token>`).
 
 ## 📋 Функционал
 
@@ -129,18 +133,24 @@ python admin_panel.py
 | Переменная | Описание | По умолчанию |
 |------------|----------|--------------|
 | `ADMIN_USERNAME` | Имя пользователя администратора | `admin` |
-| `ADMIN_PASSWORD` | Пароль администратора | `***REMOVED***` |
-| `SECRET_KEY` | Секретный ключ Flask | `change-this-in-production` |
+| `ADMIN_PASSWORD` | Пароль администратора (открытый текст) | не задан — вход запрещён |
+| `ADMIN_PASSWORD_HASH` | Хеш пароля (приоритетнее `ADMIN_PASSWORD`) | — |
+| `SECRET_KEY` | Секретный ключ Flask | генерируется временно |
 | `FLASK_HOST` | Хост для запуска | `127.0.0.1` |
 | `FLASK_PORT` | Порт веб-интерфейса | `5000` |
 | `DATABASE_PATH` | Путь к базе данных | `data/ticket_bot.db` |
+| `SESSION_TIMEOUT_MINUTES` | Авто-logout неактивной сессии | `60` |
+| `LOGIN_MAX_ATTEMPTS` | Попыток входа до блокировки | `5` |
+| `LOGIN_LOCKOUT_SECONDS` | Длительность блокировки входа | `900` |
+| `IP_WHITELIST` | Список разрешённых IP через запятую | без ограничений |
+| `METRICS_TOKEN` | Токен для `/metrics` | без токена |
 
 ## ⚠️ Production рекомендации
 
-1. **Смените пароли:**
+1. **Задайте пароль/хеш и случайный ключ:**
    ```env
-   ADMIN_PASSWORD=<сложный-пароль>
-   SECRET_KEY=$(openssl rand -hex 32)
+   ADMIN_PASSWORD_HASH=<хеш из generate_password_hash>
+   SECRET_KEY=<hex-строка из secrets.token_hex(32)>
    ```
 
 2. **Используйте HTTPS:**

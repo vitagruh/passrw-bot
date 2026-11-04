@@ -34,24 +34,27 @@ from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 import csv
 import io
-import hashlib
 import secrets
 import time
 from collections import defaultdict
 
 from flask import (
     Flask, render_template_string, request, redirect, url_for, 
-    flash, session, jsonify, abort, make_response, send_file
+    flash, session, jsonify, abort, send_file
 )
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash
 import telebot
 from dotenv import load_dotenv
+
+# .env должен быть загружен до импорта db/tracking_sync: они читают пути при импорте.
+load_dotenv()
+
+import db
 
 # Импорт модуля синхронизации для интеграции с ботом
 from tracking_sync import (
     request_tracking_stop,
     force_delete_tracking,
-    create_sync_table
 )
 
 # Загрузка переменных окружения
@@ -64,10 +67,17 @@ load_dotenv()
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/ticket_bot.db")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "***REMOVED***")  # Смените в production!
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-in-production")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+if not SECRET_KEY:
+    SECRET_KEY = secrets.token_hex(32)
+    print("⚠️ SECRET_KEY не задан: используется временный ключ (сессии сбросятся при перезапуске)")
 FLASK_PORT = int(os.getenv("FLASK_PORT", 5000))
 FLASK_HOST = os.getenv("FLASK_HOST", "127.0.0.1")
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+LOGIN_MAX_ATTEMPTS = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_LOCKOUT_SECONDS = int(os.getenv("LOGIN_LOCKOUT_SECONDS", "900"))
 
 # Расширенные настройки безопасности и функционала
 IP_WHITELIST = os.getenv("IP_WHITELIST", "").split(",") if os.getenv("IP_WHITELIST") else []
@@ -90,8 +100,8 @@ if not TELEGRAM_TOKEN:
     print("❌ TELEGRAM_TOKEN не найден в .env")
     exit(1)
 
-# Инициализация таблицы синхронизации при старте админ-панели
-create_sync_table()
+# Инициализация единой схемы БД при старте админ-панели
+db.init_schema()
 
 # Инициализация бота для отправки сообщений
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
@@ -134,6 +144,39 @@ class RateLimiter:
 
 
 rate_limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW)
+
+# Отдельный лимит попыток входа: {ip: [timestamps]}
+login_attempts: Dict[str, List[float]] = defaultdict(list)
+
+
+def login_is_locked(client_ip: str) -> bool:
+    now = time.time()
+    attempts = [t for t in login_attempts.get(client_ip, []) if now - t < LOGIN_LOCKOUT_SECONDS]
+    login_attempts[client_ip] = attempts
+    return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+
+def register_login_failure(client_ip: str) -> None:
+    login_attempts[client_ip].append(time.time())
+
+
+def clear_login_failures(client_ip: str) -> None:
+    login_attempts.pop(client_ip, None)
+
+
+def verify_admin_credentials(username: str, password: str) -> bool:
+    """Проверка логина/пароля с поддержкой хеша (ADMIN_PASSWORD_HASH)."""
+    if username != ADMIN_USERNAME or not password:
+        return False
+    if ADMIN_PASSWORD_HASH:
+        try:
+            return check_password_hash(ADMIN_PASSWORD_HASH, password)
+        except Exception as e:
+            logger.error(f"Ошибка проверки ADMIN_PASSWORD_HASH: {e}")
+            return False
+    if ADMIN_PASSWORD:
+        return secrets.compare_digest(password, ADMIN_PASSWORD)
+    return False
 
 # ============================================
 # МОНИТОРИНГ СИСТЕМЫ
@@ -222,7 +265,48 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+
+
+def csrf_token() -> str:
+    """Токен CSRF для форм админ-панели."""
+    if '_csrf_token' not in session:
+        session['_csrf_token'] = secrets.token_hex(32)
+    return session['_csrf_token']
+
+
+app.jinja_env.globals['csrf_token'] = csrf_token
+# Единое отображение времени из SQLite (UTC) в локальном часовом поясе.
+app.jinja_env.filters['localdt'] = lambda value, fmt="%d.%m.%Y %H:%M": db.fmt_local(value, fmt)
+
+
+@app.before_request
+def enforce_security():
+    """IP whitelist, таймаут сессии и CSRF-защита для изменяющих запросов."""
+    if IP_WHITELIST and request.remote_addr not in IP_WHITELIST:
+        system_monitor.record_error('IP_BLOCKED', f'IP {request.remote_addr} blocked')
+        logger.warning(f"🚫 Доступ запрещён для IP: {request.remote_addr}")
+        abort(403)
+
+    if session.get('logged_in'):
+        last_activity = session.get('last_activity', 0)
+        now = time.time()
+        if last_activity and now - last_activity > SESSION_TIMEOUT_MINUTES * 60:
+            logger.info(f"⏰ Session timeout для {session.get('admin_username')}")
+            session.clear()
+            flash('⏰ Сессия истекла по таймауту', 'warning')
+            return redirect(url_for('login'))
+        session['last_activity'] = now
+
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        # /login защищён отдельным rate limit; для него CSRF-сессия ещё не создана.
+        if request.endpoint != 'login':
+            expected = session.get('_csrf_token')
+            supplied = request.form.get('_csrf_token') or request.headers.get('X-CSRF-Token')
+            if not expected or not supplied or not secrets.compare_digest(expected, supplied):
+                logger.warning(f"🚫 CSRF-проверка не пройдена: {request.path} from {request.remote_addr}")
+                abort(400, description='CSRF token missing or invalid')
 
 
 # ============================================
@@ -231,19 +315,9 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 
 @contextmanager
 def get_db_cursor():
-    """Контекстный менеджер для работы с БД"""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        cursor = conn.cursor()
+    """Контекстный менеджер БД с едиными pragma (WAL, busy_timeout, FK)."""
+    with db.get_db_cursor(DATABASE_PATH) as cursor:
         yield cursor
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"❌ Ошибка БД: {e}")
-        raise
-    finally:
-        conn.close()
 
 
 def get_all_trackings() -> List[sqlite3.Row]:
@@ -692,6 +766,16 @@ def send_email_alert(subject: str, message: str):
         return False
 
 
+def csv_safe(value):
+    """Защита от CSV-инъекций (формулы Excel)."""
+    if value is None:
+        return ''
+    text = str(value)
+    if text and text[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + text
+    return text
+
+
 def export_trackings_to_csv() -> io.StringIO:
     """Экспорт трекингов в CSV формат"""
     output = io.StringIO()
@@ -708,14 +792,14 @@ def export_trackings_to_csv() -> io.StringIO:
         writer.writerow([
             t['id'],
             t['chat_id'],
-            f"@{t['username']}" if t['username'] else t['first_name'],
-            f"{t['from_station']} → {t['to_station']}",
-            t['date'],
-            t['train_time'],
+            csv_safe(f"@{t['username']}" if t['username'] else t['first_name']),
+            csv_safe(f"{t['from_station']} → {t['to_station']}"),
+            csv_safe(t['date']),
+            csv_safe(t['train_time']),
             t['seats_available'],
             'Да' if t['heartbeat_enabled'] else 'Нет',
             t['requests_count'],
-            t['created_at']
+            db.fmt_local(t['created_at'])
         ])
     
     output.seek(0)
@@ -736,11 +820,11 @@ def export_users_to_csv() -> io.StringIO:
     for u in users:
         writer.writerow([
             u['chat_id'],
-            f"@{u['username']}" if u['username'] else '',
-            u['first_name'],
-            u['last_name'],
-            u['created_at'],
-            u['last_active']
+            csv_safe(f"@{u['username']}" if u['username'] else ''),
+            csv_safe(u['first_name']),
+            csv_safe(u['last_name']),
+            db.fmt_local(u['created_at']),
+            db.fmt_local(u['last_active'])
         ])
     
     output.seek(0)
@@ -890,6 +974,27 @@ BASE_TEMPLATE = '''
     </div>
     
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    (function () {
+        var token = "{{ csrf_token() }}";
+        function inject() {
+            document.querySelectorAll('form').forEach(function (form) {
+                if (!/post/i.test(form.method || '')) return;
+                if (form.querySelector('input[name="_csrf_token"]')) return;
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = '_csrf_token';
+                input.value = token;
+                form.appendChild(input);
+            });
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', inject);
+        } else {
+            inject();
+        }
+    })();
+    </script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>
@@ -1280,7 +1385,7 @@ TRACKINGS_TEMPLATE = BASE_TEMPLATE.replace(
                                 {% endif %}
                             </td>
                             <td>{{ tracking.requests_count }}</td>
-                            <td><small>{{ tracking.created_at }}</small></td>
+                            <td><small>{{ tracking.created_at | localdt }}</small></td>
                             <td>
                                 <a href="{{ url_for('tracking_detail', tracking_id=tracking.id) }}" 
                                    class="btn btn-sm btn-info btn-action" title="Детали">
@@ -1318,8 +1423,8 @@ USER_DETAIL_TEMPLATE = BASE_TEMPLATE.replace(
                     <p><strong>Chat ID:</strong> {{ user.chat_id }}</p>
                     <p><strong>Username:</strong> {% if user.username %}@{{ user.username }}{% else %}Не указан{% endif %}</p>
                     <p><strong>Имя:</strong> {{ user.first_name or '' }} {{ user.last_name or '' }}</p>
-                    <p><strong>Зарегистрирован:</strong> {{ user.created_at }}</p>
-                    <p><strong>Последняя активность:</strong> {{ user.last_active }}</p>
+                    <p><strong>Зарегистрирован:</strong> {{ user.created_at | localdt }}</p>
+                    <p><strong>Последняя активность:</strong> {{ user.last_active | localdt }}</p>
                 </div>
             </div>
         </div>
@@ -1349,7 +1454,7 @@ USER_DETAIL_TEMPLATE = BASE_TEMPLATE.replace(
         <a href="{{ url_for('send_message', chat_id=user.chat_id) }}" class="btn btn-primary">
             <i class="bi bi-chat-dots"></i> Написать сообщение
         </a>
-        <a href="{{ url_for('users_list') }}" class="btn btn-secondary">
+        <a href="{{ url_for('users_management') }}" class="btn btn-secondary">
             <i class="bi bi-arrow-left"></i> Назад
         </a>
     </div>
@@ -1383,8 +1488,8 @@ USERS_TEMPLATE = BASE_TEMPLATE.replace(
                             <td>{{ user.chat_id }}</td>
                             <td>{% if user.username %}@{{ user.username }}{% else %}-{% endif %}</td>
                             <td>{{ user.first_name or '' }} {{ user.last_name or '' }}</td>
-                            <td><small>{{ user.created_at }}</small></td>
-                            <td><small>{{ user.last_active }}</small></td>
+                            <td><small>{{ user.created_at | localdt }}</small></td>
+                            <td><small>{{ user.last_active | localdt }}</small></td>
                             <td>{{ user.tracking_count or 0 }}</td>
                             <td>
                                 <a href="{{ url_for('user_detail', chat_id=user.chat_id) }}" 
@@ -1441,7 +1546,7 @@ SEND_MESSAGE_TEMPLATE = BASE_TEMPLATE.replace(
                         <button type="submit" class="btn btn-primary">
                             <i class="bi bi-send"></i> Отправить
                         </button>
-                        <a href="{{ url_for('users_list') }}" class="btn btn-secondary">
+                        <a href="{{ url_for('users_management') }}" class="btn btn-secondary">
                             <i class="bi bi-arrow-left"></i> Назад
                         </a>
                     </form>
@@ -1528,7 +1633,7 @@ LOGS_TEMPLATE = BASE_TEMPLATE.replace(
                             </td>
                             <td><span class="badge bg-info">{{ log.action }}</span></td>
                             <td><small>{{ log.details[:100] }}{{ '...' if log.details|length > 100 else '' }}</small></td>
-                            <td><small>{{ log.created_at }}</small></td>
+                            <td><small>{{ log.created_at | localdt }}</small></td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -1575,7 +1680,7 @@ LOGS_TEMPLATE = BASE_TEMPLATE.replace(
                             <td>
                                 {% if error.username %}@{{ error.username }}{% else %}-{% endif %}
                             </td>
-                            <td><small>{{ error.created_at }}</small></td>
+                            <td><small>{{ error.created_at | localdt }}</small></td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -1614,7 +1719,7 @@ LOGS_TEMPLATE = BASE_TEMPLATE.replace(
                             <td><span class="badge bg-info">{{ log.action }}</span></td>
                             <td>{{ log.details or '-' }}</td>
                             <td><code>{{ log.ip_address or 'N/A' }}</code></td>
-                            <td><small>{{ log.created_at }}</small></td>
+                            <td><small>{{ log.created_at | localdt }}</small></td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -1652,7 +1757,7 @@ TRACKING_DETAIL_TEMPLATE = BASE_TEMPLATE.replace(
                         {% endif %}
                     </p>
                     <p><strong>Всего запросов:</strong> {{ tracking.requests_count }}</p>
-                    <p><strong>Создан:</strong> {{ tracking.created_at }}</p>
+                    <p><strong>Создан:</strong> {{ tracking.created_at | localdt }}</p>
                 </div>
             </div>
         </div>
@@ -1672,7 +1777,7 @@ TRACKING_DETAIL_TEMPLATE = BASE_TEMPLATE.replace(
                     
                     <hr>
                     
-                    <form method="POST" action="{{ url_for('toggle_heartbeat', tracking_id=tracking.id) }}">
+                    <form method="POST" action="{{ url_for('toggle_heartbeat_route', tracking_id=tracking.id) }}">
                         {% if tracking.heartbeat_enabled %}
                             <button type="submit" class="btn btn-warning">
                                 <i class="bi bi-pause"></i> Pause Heartbeat
@@ -1740,21 +1845,30 @@ TRACKING_DETAIL_TEMPLATE = BASE_TEMPLATE.replace(
 def login():
     """Страница входа"""
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        # Простая проверка (в production используйте хеширование!)
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        client_ip = request.remote_addr or 'unknown'
+        if login_is_locked(client_ip):
+            logger.warning(f"🔒 Вход заблокирован (слишком много попыток): {client_ip}")
+            flash('🔒 Слишком много неудачных попыток. Попробуйте позже.', 'danger')
+            return render_template_string(LOGIN_TEMPLATE), 429
+
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+
+        if verify_admin_credentials(username, password):
+            session.clear()
             session['logged_in'] = True
             session['admin_username'] = username
+            session['last_activity'] = time.time()
             session.permanent = True
-            
+            clear_login_failures(client_ip)
+
             log_admin_action(username, 'LOGIN', 'Успешный вход')
             flash('✅ Добро пожаловать!', 'success')
             return redirect(url_for('dashboard'))
-        else:
-            log_admin_action(username or 'unknown', 'LOGIN_FAILED', f'Попытка входа с IP: {request.remote_addr}')
-            flash('❌ Неверное имя пользователя или пароль', 'danger')
+
+        register_login_failure(client_ip)
+        log_admin_action(username or 'unknown', 'LOGIN_FAILED', f'Попытка входа с IP: {client_ip}')
+        flash('❌ Неверное имя пользователя или пароль', 'danger')
     
     return render_template_string(LOGIN_TEMPLATE)
 
@@ -1808,17 +1922,19 @@ def delete_tracking(tracking_id):
         
         # Сначала запрашиваем остановку через систему синхронизации
         # Это корректно остановит поток в боте
-        if request_tracking_stop(chat_id, train_time, session.get('admin_username')):
+        if request_tracking_stop(
+            chat_id, train_time, session.get('admin_username'), tracking_id=tracking_id
+        ):
             # Флаг установлен, бот сам удалит запись после остановки потока
             log_admin_action(
-                session['admin_username'], 
-                'DELETE_TRACKING', 
+                session.get('admin_username'),
+                'DELETE_TRACKING',
                 f'Запрошена остановка трекинга #{tracking_id} для пользователя {chat_id} (поезд {train_time})'
             )
             flash('✅ Запрос на остановку трекинга отправлен. Бот остановит мониторинг.', 'success')
         else:
             # Если не удалось установить флаг, используем принудительное удаление
-            if force_delete_tracking(chat_id, train_time):
+            if force_delete_tracking(chat_id, train_time, tracking_id=tracking_id):
                 log_admin_action(
                     session['admin_username'], 
                     'FORCE_DELETE_TRACKING', 
@@ -1835,11 +1951,11 @@ def delete_tracking(tracking_id):
 
 @app.route('/tracking/<int:tracking_id>/toggle_heartbeat', methods=['POST'])
 @login_required
-def toggle_heartbeat(tracking_id):
+def toggle_heartbeat_route(tracking_id):
     """Переключение статуса heartbeat"""
     tracking = get_tracking_by_id(tracking_id)
     if tracking:
-        new_status = not tracking.heartbeat_enabled
+        new_status = not bool(tracking['heartbeat_enabled'])
         if toggle_heartbeat(tracking_id, new_status):
             log_admin_action(
                 session['admin_username'],
@@ -1877,23 +1993,6 @@ def update_heartbeat(tracking_id):
     return redirect(url_for('tracking_detail', tracking_id=tracking_id))
 
 
-@app.route('/users')
-@login_required
-def users_list():
-    """Список пользователей"""
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            SELECT u.*, COUNT(at.id) as tracking_count
-            FROM users u
-            LEFT JOIN active_trackings at ON u.chat_id = at.chat_id
-            GROUP BY u.chat_id
-            ORDER BY u.last_active DESC
-        """)
-        users = cursor.fetchall()
-    
-    return render_template_string(USERS_TEMPLATE, users=users)
-
-
 @app.route('/user/<int:chat_id>')
 @login_required
 def user_detail(chat_id):
@@ -1901,7 +2000,7 @@ def user_detail(chat_id):
     user = get_user_by_chat_id(chat_id)
     if not user:
         flash('❌ Пользователь не найден', 'danger')
-        return redirect(url_for('users_list'))
+        return redirect(url_for('users_management'))
     
     user_trackings = []
     with get_db_cursor() as cursor:
@@ -2033,12 +2132,23 @@ def set_user_role(chat_id):
 # API ЭНДПОИНТЫ (для AJAX запросов)
 # ============================================
 
+def _json_safe(value):
+    """Рекурсивно приводит sqlite3.Row и вложенные структуры к JSON-типу."""
+    if isinstance(value, sqlite3.Row):
+        return {key: _json_safe(value[key]) for key in value.keys()}
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 @app.route('/api/statistics')
 @login_required
 @rate_limit_check
 def api_statistics():
     """API для получения статистики"""
-    return jsonify(get_statistics())
+    return jsonify(_json_safe(get_statistics()))
 
 
 @app.route('/api/trackings')
@@ -2054,11 +2164,24 @@ def api_trackings():
 @login_required
 @rate_limit_check
 def api_delete_tracking(tracking_id):
-    """API для удаления трекинга"""
-    if delete_tracking(tracking_id):
-        log_admin_action(session['admin_username'], 'API_DELETE_TRACKING', f'#{tracking_id}')
+    """API для удаления трекинга через механизм синхронизации."""
+    tracking = get_tracking_by_id(tracking_id)
+    if not tracking:
+        return jsonify({'success': False, 'error': 'not found'}), 404
+
+    chat_id = tracking['chat_id']
+    train_time = tracking['train_time']
+    ok = request_tracking_stop(
+        chat_id, train_time, session.get('admin_username'), tracking_id=tracking_id
+    )
+    if not ok:
+        ok = force_delete_tracking(chat_id, train_time, tracking_id=tracking_id)
+    if ok:
+        log_admin_action(
+            session.get('admin_username'), 'API_DELETE_TRACKING', f'#{tracking_id}'
+        )
         return jsonify({'success': True})
-    return jsonify({'success': False}), 404
+    return jsonify({'success': False, 'error': 'failed'}), 500
 
 
 # ============================================
@@ -2105,7 +2228,6 @@ def export_users_csv():
 @login_required
 def system_monitoring():
     """Страница детального мониторинга системы"""
-    stats = get_statistics()
     monitor_data = system_monitor.get_statistics()
     
     return render_template_string(BASE_TEMPLATE.replace(
@@ -2215,7 +2337,10 @@ def system_monitoring():
             function sendTestAlert() {
                 fetch('/api/send_test_alert', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'}
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': "{{ csrf_token() }}"
+                    }
                 })
                 .then(r => r.json())
                 .then(data => {
@@ -2283,6 +2408,83 @@ def send_manual_alert():
 
 
 # ============================================
+# HEALTHCHECK И МЕТРИКИ (P2)
+# ============================================
+
+@app.route('/healthz')
+def healthz():
+    """Публичный healthcheck для Docker/systemd/балансировщика."""
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT 1")
+            trackings = cursor.execute(
+                "SELECT COUNT(*) AS c FROM active_trackings"
+            ).fetchone()['c']
+            users = cursor.execute("SELECT COUNT(*) AS c FROM users").fetchone()['c']
+        return jsonify({
+            'status': 'ok',
+            'db': 'ok',
+            'trackings': trackings,
+            'users': users,
+            'uptime_seconds': int((datetime.now() - system_monitor.start_time).total_seconds()),
+        })
+    except Exception as e:
+        logger.error(f"Healthcheck failed: {e}")
+        return jsonify({'status': 'error', 'db': 'error'}), 503
+
+
+@app.route('/metrics')
+def prometheus_metrics():
+    """Метрики в формате Prometheus. Опционально защищены METRICS_TOKEN."""
+    token = os.getenv('METRICS_TOKEN', '')
+    if token:
+        supplied = request.headers.get('Authorization', '')
+        if supplied.lower().startswith('bearer '):
+            supplied = supplied[7:]
+        supplied = supplied or request.args.get('token', '')
+        if not supplied or not secrets.compare_digest(token, supplied):
+            abort(403)
+
+    try:
+        with get_db_cursor() as cursor:
+            trackings = cursor.execute(
+                "SELECT COUNT(*) AS c FROM active_trackings"
+            ).fetchone()['c']
+            users = cursor.execute("SELECT COUNT(*) AS c FROM users").fetchone()['c']
+            errors = cursor.execute(
+                "SELECT COUNT(*) AS c FROM bot_errors"
+            ).fetchone()['c']
+        db_ok = 1
+    except Exception:
+        trackings = users = errors = 0
+        db_ok = 0
+
+    uptime = int((datetime.now() - system_monitor.start_time).total_seconds())
+    lines = [
+        "# HELP passrw_up Uptime of admin panel in seconds",
+        "# TYPE passrw_up gauge",
+        f"passrw_up {uptime}",
+        "# HELP passrw_db_ok Database availability (1 = ok)",
+        "# TYPE passrw_db_ok gauge",
+        f"passrw_db_ok {db_ok}",
+        "# HELP passrw_users_total Registered users",
+        "# TYPE passrw_users_total gauge",
+        f"passrw_users_total {users}",
+        "# HELP passrw_trackings_active Active trackings",
+        "# TYPE passrw_trackings_active gauge",
+        f"passrw_trackings_active {trackings}",
+        "# HELP passrw_errors_total Bot errors stored",
+        "# TYPE passrw_errors_total counter",
+        f"passrw_errors_total {errors}",
+        "# HELP passrw_rate_limit_hits Rate limit hits in monitor window",
+        "# TYPE passrw_rate_limit_hits counter",
+        f"passrw_rate_limit_hits {system_monitor.rate_limit_hits}",
+    ]
+    return ("\n".join(lines) + "\n", 200,
+            {"Content-Type": "text/plain; version=0.0.4; charset=utf-8"})
+
+
+# ============================================
 # ЗАПУСК
 # ============================================
 
@@ -2290,24 +2492,17 @@ if __name__ == '__main__':
     logger.info("=" * 50)
     logger.info("🚀 Админ-панель запускается...")
     logger.info(f"📊 Database: {DATABASE_PATH}")
-    logger.info(f"🤖 Bot Token: {'***' + TELEGRAM_TOKEN[-5:]}")
+    logger.info(f"🤖 Bot Token: {'задан' if TELEGRAM_TOKEN else 'не задан'}")
     logger.info(f"🔐 Admin Username: {ADMIN_USERNAME}")
     logger.info(f"🌐 URL: http://{FLASK_HOST}:{FLASK_PORT}")
     logger.info("=" * 50)
-    logger.info("⚠️  В production измените ADMIN_PASSWORD и SECRET_KEY!")
+    if not ADMIN_PASSWORD and not ADMIN_PASSWORD_HASH:
+        logger.critical("❌ ADMIN_PASSWORD или ADMIN_PASSWORD_HASH не заданы. Вход невозможен.")
+        raise SystemExit(1)
+    if not os.getenv("SECRET_KEY"):
+        logger.warning("⚠️ SECRET_KEY не задан: сессии будут сброшены при перезапуске.")
     logger.info("=" * 50)
-    
-    # Создаем таблицу логов при первом запуске
-    with get_db_cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_username TEXT NOT NULL,
-                action TEXT NOT NULL,
-                details TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                ip_address TEXT
-            )
-        """)
-    
-    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False)
+
+    # Production WSGI-сервер вместо встроенного Flask dev-сервера.
+    from waitress import serve
+    serve(app, host=FLASK_HOST, port=FLASK_PORT, threads=8)

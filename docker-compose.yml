@@ -1,0 +1,42 @@
+services:
+  bot:
+    build: .
+    command: ["python", "ticket_bot.py"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/ticket_bot.db
+      SYNC_DIR: /app/data/sync
+    volumes:
+      - bot_data:/app/data
+      - bot_logs:/app/logs
+    restart: unless-stopped
+
+  admin:
+    build: .
+    command: ["python", "admin_panel.py"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/ticket_bot.db
+      SYNC_DIR: /app/data/sync
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: 5000
+    volumes:
+      - bot_data:/app/data
+      - bot_logs:/app/logs
+    ports:
+      # Наружу отдавайте только через reverse proxy с HTTPS.
+      - "127.0.0.1:5000:5000"
+    depends_on:
+      - bot
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  bot_data:
+  bot_logs:

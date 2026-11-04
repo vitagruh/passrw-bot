@@ -1,1 +1,20 @@
+# Секреты и локальная конфигурация
 .env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Данные и логи
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# Sync-файлы
+/tmp/ticket_bot_sync/
