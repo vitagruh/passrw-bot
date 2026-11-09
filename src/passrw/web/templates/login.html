@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход · passrw admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+<main class="login-card">
+  <div class="login-brand">🚂 passrw <small>admin</small></div>
+  <p class="muted">Вход в панель управления трекингами</p>
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" autocomplete="off">
+    <label>Логин
+      <input type="text" name="username" required autofocus maxlength="64">
+    </label>
+    <label>Пароль
+      <input type="password" name="password" required maxlength="256">
+    </label>
+    <button class="btn primary" type="submit">Войти</button>
+  </form>
+  <p class="hint">Вход блокируется после нескольких неудачных попыток.</p>
+</main>
+</body>
+</html>

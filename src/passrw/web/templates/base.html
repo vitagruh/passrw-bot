@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}passrw admin{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🚂 <span>passrw</span> <small>v{{ version }}</small></div>
+  {% if admin %}
+  <nav>
+    <a href="/" class="{{ 'active' if nav == 'dashboard' else '' }}">Панель</a>
+    <a href="/trackings" class="{{ 'active' if nav == 'trackings' else '' }}">Трекинги</a>
+    <a href="/users" class="{{ 'active' if nav == 'users' else '' }}">Пользователи</a>
+    <a href="/logs" class="{{ 'active' if nav == 'logs' else '' }}">Логи</a>
+    <a href="/export/trackings.csv?active=all">Экспорт</a>
+  </nav>
+  <form method="post" action="/logout" class="logout">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+    <button class="btn ghost" type="submit">Выйти</button>
+  </form>
+  {% endif %}
+</header>
+<main class="container">
+  {% if message %}<div class="flash ok">{{ message }}</div>{% endif %}
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer>passrw admin · часовой пояс {{ settings.local_timezone }} · <a href="/healthz">healthz</a></footer>
+</body>
+</html>

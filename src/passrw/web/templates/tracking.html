@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Трекинг #{{ t.id }} · passrw admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Трекинг #{{ t.id }}</h1>
+  <div>
+    {% if t.is_active %}<span class="badge ok">активен</span>
+    {% else %}<span class="badge">{{ t.stop_reason or 'остановлен' }}</span>{% endif %}
+    {% if running %}<span class="badge ok">задача запущена</span>{% endif %}
+    <a class="btn ghost" href="/trackings">← К списку</a>
+  </div>
+</div>
+
+<div class="grid two">
+  <section class="panel">
+    <h2>{{ t.from_station }} → {{ t.to_station }}</h2>
+    <dl class="facts">
+      <dt>Дата поездки</dt><dd>{{ t.travel_date.strftime('%d.%m.%Y') }}</dd>
+      <dt>Поезд</dt><dd>№{{ t.train_number or '—' }} · {{ t.depart_time }}</dd>
+      <dt>Пассажиры</dt><dd>{{ t.passengers }}</dd>
+      <dt>Пользователь</dt><dd>{{ t.chat_id }}{% if t.user %} · {{ t.user.first_name or '' }} @{{ t.user.username or '—' }}{% endif %}</dd>
+      <dt>Мест сейчас</dt><dd>{{ t.seats_available }}</dd>
+      <dt>Мин. цена</dt><dd>{{ '%.2f BYN'|format(t.min_price) if t.min_price is not none else '—' }}</dd>
+      <dt>Проверок</dt><dd>{{ t.requests_count }}</dd>
+      <dt>Последняя проверка</dt><dd>{{ t.last_checked_at|localdt if t.last_checked_at else '—' }}</dd>
+      <dt>Последнее уведомление</dt><dd>{{ t.last_notified_at|localdt if t.last_notified_at else '—' }}</dd>
+      <dt>Остановлен</dt><dd>{{ t.stopped_at|localdt if t.stopped_at else '—' }}</dd>
+      <dt>Создан</dt><dd>{{ t.created_at|localdt }}</dd>
+    </dl>
+    {% if t.last_error %}<div class="flash error">Последняя ошибка: {{ t.last_error }}</div>{% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Управление</h2>
+    {% if t.is_active %}
+    <form method="post" action="/trackings/{{ t.id }}/stop" class="stack">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+      <label class="check"><input type="checkbox" name="notify" checked> Сообщить пользователю</label>
+      <button class="btn danger" type="submit">Остановить трекинг</button>
+    </form>
+    {% else %}
+    <form method="post" action="/trackings/{{ t.id }}/delete" class="stack">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+      <button class="btn danger" type="submit">Удалить запись</button>
+    </form>
+    {% endif %}
+
+    <h3>Фильтры трекинга</h3>
+    <p class="hint">Пустой порог или цена означают «взять из настроек пользователя».</p>
+    <form method="post" action="/trackings/{{ t.id }}/filters" class="stack">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+      <div class="row">
+        <label>Порог мест
+          <input type="number" name="notify_threshold" min="1" max="20"
+                 value="{{ t.notify_threshold if t.notify_threshold is not none else '' }}">
+        </label>
+        <label>Макс. цена, BYN
+          <input type="number" name="max_price" step="0.01" min="0.01"
+                 value="{{ '%.2f'|format(t.max_price) if t.max_price is not none else '' }}">
+        </label>
+      </div>
+      <label>Тип вагона
+        <select name="carriage_filter">
+          {% for key, value in carriage_filters.items() %}
+          <option value="{{ key }}" {{ 'selected' if value == t.carriage_filter else '' }}>
+            {{ carriage_labels[key] }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <div class="row">
+        <label>Heartbeat, сек
+          <input type="number" name="heartbeat_interval" min="300" step="60" value="{{ t.heartbeat_interval }}">
+        </label>
+        <label class="check"><input type="checkbox" name="heartbeat_enabled" {{ 'checked' if t.heartbeat_enabled else '' }}> Heartbeat</label>
+        <label class="check"><input type="checkbox" name="stop_on_success" {{ 'checked' if t.stop_on_success else '' }}> Стоп после находки</label>
+      </div>
+      <button class="btn primary" type="submit">Сохранить фильтры</button>
+    </form>
+  </section>
+</div>
+
+<section class="panel">
+  <h2>История наличия мест</h2>
+  {% if samples %}
+  <table>
+    <thead><tr><th>Время</th><th>Мест</th><th>Мин. цена</th></tr></thead>
+    <tbody>
+      {% for s in samples|reverse %}
+      <tr>
+        <td class="nowrap">{{ s.checked_at|localdt }}</td>
+        <td>{{ s.seats }}</td>
+        <td>{{ '%.2f BYN'|format(s.min_price) if s.min_price is not none else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Замеров пока нет.</p>
+  {% endif %}
+</section>
+{% endblock %}

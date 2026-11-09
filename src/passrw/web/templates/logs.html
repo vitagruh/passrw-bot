@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Логи · passrw admin{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Логи</h1></div>
+
+<div class="tabs">
+  <a href="/logs?kind=errors" class="{{ 'active' if kind == 'errors' else '' }}">Ошибки бота</a>
+  <a href="/logs?kind=users" class="{{ 'active' if kind == 'users' else '' }}">События пользователей</a>
+  <a href="/logs?kind=admin" class="{{ 'active' if kind == 'admin' else '' }}">Действия админов</a>
+</div>
+
+<section class="panel">
+  {% if items %}
+  <table class="cards-table">
+    {% if kind == 'errors' %}
+    <thead><tr><th>Время</th><th>Тип</th><th>Chat</th><th>Сообщение</th></tr></thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td data-label="Время" class="nowrap">{{ item.created_at|localdt }}</td>
+        <td data-label="Тип"><span class="badge">{{ item.error_type }}</span></td>
+        <td data-label="Chat">{{ item.chat_id or '—' }}</td>
+        <td data-label="Сообщение" class="wide">
+          {{ item.message }}
+          {% if item.stack_trace %}
+          <details><summary class="muted small">stack trace</summary><pre>{{ item.stack_trace }}</pre></details>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    {% elif kind == 'users' %}
+    <thead><tr><th>Время</th><th>Chat</th><th>Событие</th><th>Детали</th></tr></thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td data-label="Время" class="nowrap">{{ item.created_at|localdt }}</td>
+        <td data-label="Chat">{{ item.chat_id }}</td>
+        <td data-label="Событие"><span class="badge">{{ item.action }}</span></td>
+        <td data-label="Детали" class="truncate wide">{{ item.details }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    {% else %}
+    <thead><tr><th>Время</th><th>Админ</th><th>Действие</th><th>IP</th><th>Детали</th></tr></thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td data-label="Время" class="nowrap">{{ item.created_at|localdt }}</td>
+        <td data-label="Админ">{{ item.admin_username }}</td>
+        <td data-label="Действие"><span class="badge">{{ item.action }}</span></td>
+        <td data-label="IP" class="muted small">{{ item.ip_address or '—' }}</td>
+        <td data-label="Детали" class="truncate wide">{{ item.details }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    {% endif %}
+  </table>
+  {% else %}
+  <p class="muted">Записей нет.</p>
+  {% endif %}
+</section>
+
+<div class="pager">
+  {% if page > 1 %}<a class="btn ghost" href="/logs?kind={{ kind }}&page={{ page - 1 }}">← Назад</a>{% endif %}
+  <span class="muted">стр. {{ page }}</span>
+  {% if has_next %}<a class="btn ghost" href="/logs?kind={{ kind }}&page={{ page + 1 }}">Вперёд →</a>{% endif %}
+</div>
+{% endblock %}

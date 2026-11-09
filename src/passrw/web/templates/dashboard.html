@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Панель · passrw admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Обзор</h1>
+  <span class="muted">uptime {{ uptime }} · активных задач: {{ running }}</span>
+</div>
+
+<section class="cards">
+  <div class="card"><span class="label">Пользователи</span><strong>{{ counts.users }}</strong></div>
+  <div class="card"><span class="label">Активные трекинги</span><strong class="ok">{{ counts.active_trackings }}</strong></div>
+  <div class="card"><span class="label">Уведомления (всего)</span><strong>{{ counts.notifications }}</strong></div>
+  <div class="card"><span class="label">Находки за 24 ч</span><strong class="ok">{{ counts.success_24h }}</strong></div>
+  <div class="card"><span class="label">Ошибки за 24 ч</span><strong class="{{ 'danger' if counts.errors_24h else '' }}">{{ counts.errors_24h }}</strong></div>
+  <div class="card"><span class="label">Остановлено трекингов</span><strong>{{ counts.stopped_trackings }}</strong></div>
+</section>
+
+<div class="grid two">
+  <section class="panel">
+    <h2>Замеры за 7 дней</h2>
+    {% if samples %}
+    <div class="chart">
+      {% for day, value in samples %}
+      <div class="bar-wrap" title="{{ day }}: {{ value }}">
+        <div class="bar" style="height: {{ (value / chart_max * 100)|round(0, 'floor')|int }}%"></div>
+        <span>{{ day[5:] }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted">Пока нет замеров наличия мест.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Популярные станции</h2>
+    {% if stations %}
+    <ol class="ranked">
+      {% for station in stations %}
+      <li><span>{{ station.name }}</span><b>{{ station.usage_count }}</b></li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="muted">Статистика появится после первых поисков.</p>
+    {% endif %}
+  </section>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Последние ошибки</h2>
+    <a class="link" href="/logs">Все логи →</a>
+  </div>
+  {% if errors %}
+  <table class="cards-table">
+    <thead><tr><th>Время</th><th>Тип</th><th>Chat</th><th>Сообщение</th></tr></thead>
+    <tbody>
+      {% for item in errors %}
+      <tr>
+        <td data-label="Время" class="nowrap">{{ item.created_at|localdt }}</td>
+        <td data-label="Тип"><span class="badge">{{ item.error_type }}</span></td>
+        <td data-label="Chat">{{ item.chat_id or '—' }}</td>
+        <td data-label="Сообщение" class="truncate wide">{{ item.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Ошибок нет — отлично.</p>
+  {% endif %}
+</section>
+{% endblock %}

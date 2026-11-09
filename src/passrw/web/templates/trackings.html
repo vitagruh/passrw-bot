@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Трекинги · passrw admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Трекинги <span class="muted">({{ total }})</span></h1>
+  <a class="btn ghost" href="/export/trackings.csv?active={{ active }}">Скачать CSV</a>
+</div>
+
+<form class="filters" method="get" action="/trackings">
+  <select name="active">
+    <option value="1" {{ 'selected' if active == '1' else '' }}>Активные</option>
+    <option value="0" {{ 'selected' if active == '0' else '' }}>Остановленные</option>
+    <option value="all" {{ 'selected' if active == 'all' else '' }}>Все</option>
+  </select>
+  <input type="search" name="q" value="{{ q }}" placeholder="Маршрут, поезд…" maxlength="64">
+  <button class="btn primary" type="submit">Фильтр</button>
+</form>
+
+<section class="panel">
+  {% if rows %}
+  <table class="cards-table">
+    <thead>
+      <tr>
+        <th>#</th><th>Пользователь</th><th>Маршрут</th><th>Дата / поезд</th>
+        <th>Мест</th><th>Цена</th><th>Проверок</th><th>Статус</th><th>Последняя проверка</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in rows %}
+      <tr>
+        <td data-label="#"><a class="link" href="/trackings/{{ t.id }}">{{ t.id }}</a></td>
+        <td data-label="Пользователь">
+          {% if t.user %}
+          <div>{{ t.user.first_name or '—' }}</div>
+          <div class="muted small">@{{ t.user.username or t.chat_id }}</div>
+          {% else %}{{ t.chat_id }}{% endif %}
+        </td>
+        <td data-label="Маршрут" class="nowrap">{{ t.from_station }} → {{ t.to_station }}</td>
+        <td data-label="Дата / поезд" class="nowrap">{{ t.travel_date.strftime('%d.%m.%Y') }}<br><span class="muted small">{{ t.depart_time }} · №{{ t.train_number or '—' }}</span></td>
+        <td data-label="Мест">{{ t.seats_available }}</td>
+        <td data-label="Цена">{{ '%.2f'|format(t.min_price) if t.min_price is not none else '—' }}</td>
+        <td data-label="Проверок">{{ t.requests_count }}</td>
+        <td data-label="Статус">
+          {% if t.is_active %}<span class="badge ok">активен</span>
+          {% else %}<span class="badge">{{ t.stop_reason or 'остановлен' }}</span>{% endif %}
+          {% if t.consecutive_failures %}<span class="badge danger">{{ t.consecutive_failures }} ошибок</span>{% endif %}
+        </td>
+        <td data-label="Последняя проверка" class="nowrap muted small">{{ t.last_checked_at|localdt if t.last_checked_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Ничего не найдено.</p>
+  {% endif %}
+</section>
+
+{% if pages > 1 %}
+<div class="pager">
+  {% if page > 1 %}<a class="btn ghost" href="/trackings?active={{ active }}&q={{ q }}&page={{ page - 1 }}">← Назад</a>{% endif %}
+  <span class="muted">стр. {{ page }} из {{ pages }}</span>
+  {% if page < pages %}<a class="btn ghost" href="/trackings?active={{ active }}&q={{ q }}&page={{ page + 1 }}">Вперёд →</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

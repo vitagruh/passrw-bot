@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Пользователи · passrw admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Пользователи <span class="muted">({{ total }})</span></h1>
+</div>
+
+<form class="filters" method="get" action="/users">
+  <input type="search" name="q" value="{{ q }}" placeholder="Имя или @username" maxlength="64">
+  <button class="btn primary" type="submit">Найти</button>
+</form>
+
+<section class="panel">
+  {% if rows %}
+  <table class="cards-table">
+    <thead>
+      <tr><th>Chat ID</th><th>Пользователь</th><th>Роль</th><th>Трекинги</th><th>Создан</th><th>Активность</th><th>Действия</th></tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      {% set user = row.user %}
+      <tr>
+        <td data-label="Chat ID" class="nowrap">{{ user.chat_id }}</td>
+        <td data-label="Пользователь">
+          <div>{{ user.first_name or '—' }} {{ user.last_name or '' }}</div>
+          <div class="muted small">@{{ user.username or '—' }}</div>
+        </td>
+        <td data-label="Роль">
+          <form method="post" action="/users/{{ user.chat_id }}/role" class="inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+            <select name="role">
+              {% for role in ['user', 'moderator', 'admin'] %}
+              <option value="{{ role }}" {{ 'selected' if user.role == role else '' }}>{{ role }}</option>
+              {% endfor %}
+            </select>
+            <button class="btn ghost small" type="submit">OK</button>
+          </form>
+        </td>
+        <td data-label="Трекинги">{{ row.active }}</td>
+        <td data-label="Создан" class="nowrap muted small">{{ user.created_at|localdt }}</td>
+        <td data-label="Активность" class="nowrap muted small">{{ user.last_active|localdt }}</td>
+        <td data-label="Действия">
+          <form method="post" action="/users/{{ user.chat_id }}/block" class="inline">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+            {% if user.is_blocked %}
+            <span class="badge danger">заблокирован</span>
+            <button class="btn ghost small" type="submit">Разблокировать</button>
+            {% else %}
+            <button class="btn ghost small danger-text" type="submit">Заблокировать</button>
+            {% endif %}
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Пользователей пока нет.</p>
+  {% endif %}
+</section>
+
+{% if pages > 1 %}
+<div class="pager">
+  {% if page > 1 %}<a class="btn ghost" href="/users?q={{ q }}&page={{ page - 1 }}">← Назад</a>{% endif %}
+  <span class="muted">стр. {{ page }} из {{ pages }}</span>
+  {% if page < pages %}<a class="btn ghost" href="/users?q={{ q }}&page={{ page + 1 }}">Вперёд →</a>{% endif %}
+</div>
+{% endif %}
+
+<section class="panel">
+  <h2>Рассылка</h2>
+  <p class="hint">Сообщение получат все незаблокированные пользователи.</p>
+  <form method="post" action="/broadcast" class="stack">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token(request) }}">
+    <textarea name="text" rows="4" maxlength="3500" required placeholder="Текст сообщения (HTML не поддерживается)"></textarea>
+    <button class="btn primary" type="submit">Отправить</button>
+  </form>
+</section>
+{% endblock %}
