@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from passrw.bot import keyboards
 from passrw.bot.texts import HELP, PRIVACY, WELCOME, web_admin_link
 from passrw.config import Settings
+from passrw.db.models import User
 
 router = Router(name="common")
 
@@ -50,9 +51,24 @@ async def cmd_privacy(message: Message) -> None:
 
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, settings: Settings) -> None:
+async def cmd_admin(
+    message: Message, settings: Settings, db_user: User | None = None
+) -> None:
+    if db_user is None or db_user.role != "admin":
+        await message.answer(
+            "🔒 Команда доступна только администратору.\n"
+            "Роль выдаётся в веб-админке на странице пользователей."
+        )
+        return
+    if not settings.web_enabled:
+        text = (
+            "🖥 Веб-админка отключена. Задайте <code>WEB_ENABLED=true</code> "
+            "и пароль администратора."
+        )
+    else:
+        text = web_admin_link(settings.public_url)
     await message.answer(
-        web_admin_link(settings.public_url if settings.web_enabled else ""),
+        text,
         reply_markup=keyboards.back_to_menu(),
         disable_web_page_preview=True,
     )

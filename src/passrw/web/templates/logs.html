@@ -63,7 +63,7 @@
 
 <div class="pager">
   {% if page > 1 %}<a class="btn ghost" href="/logs?kind={{ kind }}&page={{ page - 1 }}">← Назад</a>{% endif %}
-  <span class="muted">стр. {{ page }}</span>
+  <span class="muted">стр. {{ page }} из {{ pages }}</span>
   {% if has_next %}<a class="btn ghost" href="/logs?kind={{ kind }}&page={{ page + 1 }}">Вперёд →</a>{% endif %}
 </div>
 {% endblock %}

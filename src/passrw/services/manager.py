@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 
 from aiogram import Bot
@@ -27,6 +28,10 @@ from passrw.services.rwby import RwbyClient, SiteUnavailable
 from passrw.util.time import local_now, utcnow
 
 logger = logging.getLogger(__name__)
+
+# Бэкофф перезапуска упавшей задачи трекинга (секунды).
+ERROR_BACKOFF_START = 5.0
+ERROR_BACKOFF_MAX = 60.0
 
 
 class TrackingManager:
@@ -52,10 +57,12 @@ class TrackingManager:
         task = self._tasks.get(tracking_id)
         return bool(task and not task.done())
 
-    def add(self, tracking_id: int) -> None:
+    def add(self, tracking_id: int, start_delay: float = 0.0) -> None:
         if self.is_running(tracking_id):
             return
-        task = asyncio.create_task(self._run(tracking_id), name=f"tracking-{tracking_id}")
+        task = asyncio.create_task(
+            self._supervise(tracking_id, start_delay), name=f"tracking-{tracking_id}"
+        )
         self._tasks[tracking_id] = task
         task.add_done_callback(lambda _t, tid=tracking_id: self._forget(tid))
         ACTIVE_TRACKINGS.set(len(self._tasks))
@@ -76,16 +83,53 @@ class TrackingManager:
         await asyncio.gather(task, return_exceptions=True)
 
     async def restore(self) -> int:
+        expired = await self.expire()
         async with self.db.session() as session:
-            expired = await repo.expire_past_trackings(session)
             trackings = await repo.list_active_trackings(session)
             ids = [t.id for t in trackings]
-        for tracking_id in ids:
-            self.add(tracking_id)
+        for position, tracking_id in enumerate(ids):
+            # Разносим первый опрос: рестарт не должен давать залп запросов.
+            start_delay = min(30.0, position * 2.0 + random.uniform(0.0, 1.0))
+            self.add(tracking_id, start_delay=start_delay)
         logger.info(
             "Восстановлено трекингов: %s (просрочено закрыто: %s)", len(ids), expired
         )
         return len(ids)
+
+    async def expire(self) -> int:
+        """Закрывает трекинги с прошедшей датой и сообщает пользователям."""
+        now_local = local_now(self.settings.timezone)
+        today = now_local.date()
+        expired: list[tuple[int, str]] = []
+        expired_ids: list[int] = []
+        async with self.db.session() as session:
+            for tracking in await repo.list_active_trackings(session):
+                if tracking.travel_date >= today:
+                    continue
+                user_settings = await repo.get_user_settings(session, tracking.chat_id)
+                await repo.deactivate_tracking(session, tracking.id, "expired")
+                expired_ids.append(tracking.id)
+                if in_quiet_hours(
+                    _quiet_from(user_settings), _quiet_to(user_settings), now_local
+                ):
+                    logger.info(
+                        "Закрытие трекинга #%s: уведомление пропущено (тихие часы)",
+                        tracking.id,
+                    )
+                    continue
+                expired.append(
+                    (
+                        tracking.chat_id,
+                        f"⌛ Трекинг {tracking.from_station} → {tracking.to_station} "
+                        f"({tracking.travel_date.strftime('%d.%m.%Y')}) закрыт: "
+                        "дата поездки прошла.",
+                    )
+                )
+        for tracking_id in expired_ids:
+            await self.cancel(tracking_id)
+        for chat_id, text in expired:
+            await self._send_deactivation(chat_id, text)
+        return len(expired_ids)
 
     async def stop(
         self,
@@ -135,6 +179,29 @@ class TrackingManager:
 
     # ── основной цикл ──────────────────────────────────────────
 
+    async def _supervise(self, tracking_id: int, start_delay: float = 0.0) -> None:
+        """Держит задачу трекинга живой: падение итерации не теряет трекинг."""
+        if start_delay > 0:
+            await asyncio.sleep(start_delay)
+        backoff = ERROR_BACKOFF_START
+        while True:
+            started = time.monotonic()
+            try:
+                await self._run(tracking_id)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — перезапускаем вместо тихой смерти
+                if time.monotonic() - started >= 300:
+                    backoff = ERROR_BACKOFF_START
+                logger.exception(
+                    "Задача трекинга #%s упала; перезапуск через %.0f с",
+                    tracking_id,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, ERROR_BACKOFF_MAX)
+
     async def _run(self, tracking_id: int) -> None:
         last_heartbeat = time.monotonic()
         try:
@@ -151,16 +218,22 @@ class TrackingManager:
                 if snapshot.heartbeat_enabled:
                     elapsed = time.monotonic() - last_heartbeat
                     if elapsed >= snapshot.heartbeat_interval:
-                        await self._send_heartbeat(
-                            snapshot.chat_id, tracking_id, snapshot.seats_available
-                        )
+                        if not in_quiet_hours(
+                            _quiet_from(user_settings),
+                            _quiet_to(user_settings),
+                            local_now(self.settings.timezone),
+                        ):
+                            await self._send_heartbeat(
+                                snapshot.chat_id, tracking_id, snapshot.seats_available
+                            )
                         last_heartbeat = time.monotonic()
 
                 CHECKS_TOTAL.inc()
                 try:
-                    trains = await self.client.search(
+                    route = await self.client.search(
                         snapshot.from_station, snapshot.to_station, snapshot.travel_date
                     )
+                    trains = route.trains
                 except LayoutChanged as exc:
                     CHECK_FAILURES.labels(reason="layout").inc()
                     await self._handle_failure(tracking_id, snapshot, "layout", str(exc))
@@ -244,6 +317,12 @@ class TrackingManager:
                 if notified and snapshot.stop_on_success:
                     async with self.db.session() as session:
                         await repo.deactivate_tracking(session, tracking_id, "success")
+                    await self._send_deactivation(
+                        snapshot.chat_id,
+                        f"✅ Трекинг {snapshot.from_station} → {snapshot.to_station} "
+                        f"({snapshot.travel_date.strftime('%d.%m.%Y')}) остановлен: "
+                        "подходящие места найдены.",
+                    )
                     logger.info("Трекинг #%s завершён после успешной находки", tracking_id)
                     return
 
@@ -251,8 +330,6 @@ class TrackingManager:
         except asyncio.CancelledError:
             logger.debug("Трекинг #%s отменён", tracking_id)
             raise
-        except Exception:  # noqa: BLE001
-            logger.exception("Трекинг #%s завершился с ошибкой", tracking_id)
         finally:
             ACTIVE_TRACKINGS.set(len(self._tasks))
 
@@ -315,6 +392,15 @@ class TrackingManager:
             await self.bot.send_message(chat_id, build_heartbeat(tracking_id, seats))
         except TelegramAPIError as exc:
             logger.debug("Heartbeat не доставлен %s: %s", chat_id, exc)
+
+    async def _send_deactivation(self, chat_id: int, text: str) -> None:
+        """Короткое уведомление о том, что трекинг закрыт."""
+        if self.bot is None:
+            return
+        try:
+            await self.bot.send_message(chat_id, text)
+        except TelegramAPIError as exc:
+            logger.debug("Не удалось сообщить о закрытии трекинга %s: %s", chat_id, exc)
 
     async def _handle_failure(
         self,

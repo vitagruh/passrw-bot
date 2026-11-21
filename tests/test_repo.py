@@ -168,3 +168,51 @@ async def test_search_history_isolated_by_chat(database):
         assert len(history) == 1
         assert await repo.get_search(session, history[0].id, chat_id=7) is None
         assert await repo.get_search(session, history[0].id, chat_id=6) is not None
+
+
+async def test_toggle_favorite_adds_and_removes(database):
+    async with database.session() as session:
+        await repo.upsert_user(session, 20)
+        assert await repo.toggle_favorite(session, 20, "Минск", "Брест", 2) is True
+
+    async with database.session() as session:
+        favorites = await repo.list_favorites(session, 20)
+        assert [(f.from_station, f.passengers) for f in favorites] == [("Минск", 2)]
+        assert await repo.toggle_favorite(session, 20, "Минск", "Брест", 2) is False
+
+    async with database.session() as session:
+        assert await repo.list_favorites(session, 20) == []
+
+
+async def test_admin_session_epoch_tracks_fingerprint_and_logout(database):
+    async with database.session() as session:
+        assert await repo.ensure_admin_session_epoch(session, "fingerprint-a") == 1
+        assert await repo.ensure_admin_session_epoch(session, "fingerprint-a") == 1
+        assert await repo.ensure_admin_session_epoch(session, "fingerprint-b") == 2
+        assert await repo.bump_admin_session_epoch(session) == 3
+
+
+async def test_dashboard_reports_findings_and_check_errors(database):
+    async with database.session() as session:
+        await repo.upsert_user(session, 30)
+        tracking = await make_tracking(session, chat_id=30)
+        await repo.add_sample_if_changed(session, tracking, seats=4, min_price=10.0)
+        await repo.update_tracking(session, tracking.id, last_checked_at=utcnow())
+
+    async with database.session() as session:
+        counts = await repo.dashboard_counts(session)
+        assert counts["success_24h"] == 1
+        assert counts["last_success_at"] is not None
+        assert counts["errors_24h"] == 0
+
+        await repo.update_tracking(
+            session,
+            tracking.id,
+            last_error="site: timeout",
+            last_checked_at=utcnow(),
+        )
+
+    async with database.session() as session:
+        counts = await repo.dashboard_counts(session)
+        assert counts["errors_24h"] == 1
+        assert counts["last_success_at"] is None

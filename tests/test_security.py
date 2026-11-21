@@ -6,7 +6,13 @@ import hashlib
 
 from argon2 import PasswordHasher
 
-from passrw.web.security import csv_safe, verify_password_hash
+from passrw.web.security import (
+    admin_credentials_fingerprint,
+    csv_safe,
+    safe_compare_str,
+    verify_password_hash,
+)
+from tests.conftest import make_settings
 
 
 def test_argon2_hash_verification():
@@ -32,3 +38,20 @@ def test_csv_formula_injection_is_neutralized():
 
     assert csv_safe("Минск") == "Минск"
     assert csv_safe(None) == ""
+
+
+def test_safe_compare_str_handles_non_ascii_and_none():
+    assert safe_compare_str("пароль", "пароль")
+    assert not safe_compare_str("пароль", "парол")
+    assert not safe_compare_str(None, "x")
+    assert not safe_compare_str("x", None)
+    assert not safe_compare_str(b"x", "x")
+
+
+def test_credentials_fingerprint_follows_password(tmp_path):
+    first = make_settings(tmp_path)
+    same = make_settings(tmp_path)
+    other = make_settings(tmp_path, admin_password="another-password")
+
+    assert admin_credentials_fingerprint(first) == admin_credentials_fingerprint(same)
+    assert admin_credentials_fingerprint(first) != admin_credentials_fingerprint(other)

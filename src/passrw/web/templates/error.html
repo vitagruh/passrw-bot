@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} · passrw admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ status }}</h1>
+  <a class="btn ghost" href="/">← На панель</a>
+</div>
+<section class="panel">
+  <p>{{ message }}</p>
+</section>
+{% endblock %}

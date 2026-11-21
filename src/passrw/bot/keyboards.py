@@ -58,7 +58,7 @@ def stations_suggestions(
 def calendar_kb(
     year: int, month: int, today: date, max_date: date | None = None
 ) -> InlineKeyboardMarkup:
-    max_date = max_date or today + timedelta(days=365)
+    max_date = max_date or today + timedelta(days=60)
     builder = InlineKeyboardBuilder()
 
     prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
@@ -98,12 +98,13 @@ def calendar_kb(
                 )
         builder.row(*row)
 
-    builder.row(
-        InlineKeyboardButton(text="Сегодня", callback_data=f"cal:day:{today.isoformat()}"),
-        InlineKeyboardButton(
-            text="Завтра", callback_data=f"cal:day:{(today + timedelta(days=1)).isoformat()}"
-        ),
-    )
+    quick_row = [InlineKeyboardButton(text="Сегодня", callback_data=f"cal:day:{today.isoformat()}")]
+    tomorrow = today + timedelta(days=1)
+    if tomorrow <= max_date:
+        quick_row.append(
+            InlineKeyboardButton(text="Завтра", callback_data=f"cal:day:{tomorrow.isoformat()}")
+        )
+    builder.row(*quick_row)
     builder.row(InlineKeyboardButton(text="✖️ Отмена", callback_data="search:cancel"))
     return builder.as_markup()
 
@@ -117,14 +118,14 @@ def passengers_kb(max_passengers: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def trains_kb(trains: list[Train]) -> InlineKeyboardMarkup:
+def trains_kb(trains: list[Train], search_id: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for index, train in enumerate(trains[:12]):
         seats = train.max_seats
         price = f" · {train.min_price:.0f} BYN" if train.min_price else ""
         builder.button(
             text=f"{train.depart_time} · №{train.number} · {seats} мест{price}",
-            callback_data=f"tr:{index}",
+            callback_data=f"tr:{search_id}:{index}",
         )
     builder.row(InlineKeyboardButton(text="✖️ Закрыть", callback_data="search:cancel"))
     builder.adjust(1)
@@ -132,16 +133,16 @@ def trains_kb(trains: list[Train]) -> InlineKeyboardMarkup:
 
 
 def train_actions_kb(
-    index: int, *, buy_url: str, favorite: bool = False
+    search_id: str, index: int, *, buy_url: str, favorite: bool = False
 ) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🔔 Отслеживать поезд", callback_data=f"trk:{index}")],
+        [InlineKeyboardButton(text="🔔 Отслеживать поезд", callback_data=f"trk:{search_id}:{index}")],
         [
             InlineKeyboardButton(
                 text="⭐ В избранном" if favorite else "⭐ В избранное",
-                callback_data=f"trfav:{index}",
+                callback_data=f"trfav:{search_id}:{index}",
             ),
-            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh:{index}"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh:{search_id}"),
         ],
         [InlineKeyboardButton(text="🎫 Открыть на pass.rw.by", url=buy_url)],
         [InlineKeyboardButton(text="⬅️ К списку поездов", callback_data="back:list")],

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, or_, select, update
@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from passrw.db.models import (
+    AdminLog,
+    AppMeta,
     AvailabilitySample,
     BotError,
     FavoriteRoute,
@@ -188,6 +190,20 @@ async def count_user_trackings(session: AsyncSession, chat_id: int) -> int:
                 Tracking.chat_id == chat_id, Tracking.is_active.is_(True)
             )
         )
+    ).scalar_one()
+
+
+async def count_active_trackings(session: AsyncSession) -> int:
+    return (
+        await session.execute(
+            select(func.count(Tracking.id)).where(Tracking.is_active.is_(True))
+        )
+    ).scalar_one()
+
+
+async def last_check_time(session: AsyncSession) -> datetime | None:
+    return (
+        await session.execute(select(func.max(Tracking.last_checked_at)))
     ).scalar_one()
 
 
@@ -411,6 +427,33 @@ async def add_favorite(
     )
 
 
+async def toggle_favorite(
+    session: AsyncSession, chat_id: int, from_station: str, to_station: str, passengers: int
+) -> bool:
+    """Добавляет маршрут в избранное или удаляет его. True — добавлен."""
+    exists = (
+        await session.execute(
+            select(FavoriteRoute).where(
+                FavoriteRoute.chat_id == chat_id,
+                FavoriteRoute.from_station == from_station,
+                FavoriteRoute.to_station == to_station,
+            )
+        )
+    ).scalar_one_or_none()
+    if exists is not None:
+        await session.delete(exists)
+        return False
+    session.add(
+        FavoriteRoute(
+            chat_id=chat_id,
+            from_station=from_station,
+            to_station=to_station,
+            passengers=passengers,
+        )
+    )
+    return True
+
+
 async def list_favorites(session: AsyncSession, chat_id: int) -> list[FavoriteRoute]:
     return list(
         (
@@ -584,8 +627,6 @@ async def log_admin_action(
     details: str | None = None,
     ip_address: str | None = None,
 ) -> None:
-    from passrw.db.models import AdminLog
-
     session.add(
         AdminLog(
             admin_username=username[:64],
@@ -596,6 +637,48 @@ async def log_admin_action(
     )
 
 
+# ── Служебные метаданные ───────────────────────────────────────
+
+_EPOCH_KEY = "admin_session_epoch"
+_FINGERPRINT_KEY = "admin_credentials_fingerprint"
+
+
+async def get_meta(session: AsyncSession, key: str) -> str | None:
+    row = await session.get(AppMeta, key)
+    return row.value if row is not None else None
+
+
+async def set_meta(session: AsyncSession, key: str, value: str) -> None:
+    row = await session.get(AppMeta, key)
+    if row is None:
+        session.add(AppMeta(key=key, value=value))
+    else:
+        row.value = value
+
+
+async def ensure_admin_session_epoch(session: AsyncSession, fingerprint: str) -> int:
+    """Возвращает эпоху админских сессий; при смене пароля увеличивает её."""
+    epoch_raw = await get_meta(session, _EPOCH_KEY)
+    epoch = int(epoch_raw) if epoch_raw and epoch_raw.isdigit() else 1
+    stored = await get_meta(session, _FINGERPRINT_KEY)
+    if stored is None:
+        await set_meta(session, _FINGERPRINT_KEY, fingerprint)
+        await set_meta(session, _EPOCH_KEY, str(epoch))
+        return epoch
+    if stored != fingerprint:
+        epoch += 1
+        await set_meta(session, _FINGERPRINT_KEY, fingerprint)
+        await set_meta(session, _EPOCH_KEY, str(epoch))
+    return epoch
+
+
+async def bump_admin_session_epoch(session: AsyncSession) -> int:
+    epoch_raw = await get_meta(session, _EPOCH_KEY)
+    epoch = (int(epoch_raw) if epoch_raw and epoch_raw.isdigit() else 1) + 1
+    await set_meta(session, _EPOCH_KEY, str(epoch))
+    return epoch
+
+
 async def list_user_logs(session: AsyncSession, limit: int = 100, offset: int = 0) -> list[UserLog]:
     return list(
         (
@@ -604,6 +687,18 @@ async def list_user_logs(session: AsyncSession, limit: int = 100, offset: int = 
             )
         ).scalars()
     )
+
+
+async def count_user_logs(session: AsyncSession) -> int:
+    return (await session.execute(select(func.count(UserLog.id)))).scalar_one()
+
+
+async def count_bot_errors(session: AsyncSession) -> int:
+    return (await session.execute(select(func.count(BotError.id)))).scalar_one()
+
+
+async def count_admin_logs(session: AsyncSession) -> int:
+    return (await session.execute(select(func.count(AdminLog.id)))).scalar_one()
 
 
 async def list_bot_errors(
@@ -619,8 +714,6 @@ async def list_bot_errors(
 
 
 async def list_admin_logs(session: AsyncSession, limit: int = 100, offset: int = 0):
-    from passrw.db.models import AdminLog
-
     return list(
         (
             await session.execute(
@@ -630,7 +723,7 @@ async def list_admin_logs(session: AsyncSession, limit: int = 100, offset: int =
     )
 
 
-async def dashboard_counts(session: AsyncSession) -> dict[str, int]:
+async def dashboard_counts(session: AsyncSession) -> dict[str, Any]:
     since = utcnow() - timedelta(hours=24)
     users = (await session.execute(select(func.count(User.chat_id)))).scalar_one()
     active = (
@@ -640,14 +733,28 @@ async def dashboard_counts(session: AsyncSession) -> dict[str, int]:
         await session.execute(select(func.count(Tracking.id)).where(Tracking.is_active.is_(False)))
     ).scalar_one()
     notifications = (await session.execute(select(func.coalesce(func.sum(UserStats.notifications_sent), 0)))).scalar_one()
-    errors = (
+    # Ошибки: необработанные исключения бота + трекинги, чья последняя проверка упала.
+    bot_errors = (
         await session.execute(select(func.count(BotError.id)).where(BotError.created_at >= since))
     ).scalar_one()
-    success = (
+    check_errors = (
         await session.execute(
             select(func.count(Tracking.id)).where(
-                Tracking.stop_reason == "success", Tracking.stopped_at >= since
+                Tracking.last_error.is_not(None), Tracking.last_checked_at >= since
             )
+        )
+    ).scalar_one()
+    # Находки: замеры с доступными местами за сутки, независимо от STOP_ON_SUCCESS.
+    findings = (
+        await session.execute(
+            select(func.count(AvailabilitySample.id)).where(
+                AvailabilitySample.checked_at >= since, AvailabilitySample.seats > 0
+            )
+        )
+    ).scalar_one()
+    last_success = (
+        await session.execute(
+            select(func.max(Tracking.last_checked_at)).where(Tracking.last_error.is_(None))
         )
     ).scalar_one()
     return {
@@ -655,8 +762,9 @@ async def dashboard_counts(session: AsyncSession) -> dict[str, int]:
         "active_trackings": int(active),
         "stopped_trackings": int(stopped),
         "notifications": int(notifications),
-        "errors_24h": int(errors),
-        "success_24h": int(success),
+        "errors_24h": int(bot_errors) + int(check_errors),
+        "success_24h": int(findings),
+        "last_success_at": last_success,
     }
 
 
@@ -671,8 +779,6 @@ async def cleanup_old_data(session: AsyncSession, retention_days: int) -> int:
     ):
         result = await session.execute(delete(model).where(column < cutoff))
         deleted += result.rowcount or 0
-
-    from passrw.db.models import AdminLog
 
     result = await session.execute(delete(AdminLog).where(AdminLog.created_at < cutoff))
     deleted += result.rowcount or 0

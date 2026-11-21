@@ -38,11 +38,16 @@ class Settings(BaseSettings):
     maintenance_interval: int = Field(21600, ge=300)
     retention_days: int = Field(30, ge=1)
     parse_failure_alert_threshold: int = Field(5, ge=1)
+    # Окно продажи билетов на pass.rw.by (суток вперёд).
+    sale_window_days: int = Field(60, ge=1, le=365)
 
     web_enabled: bool = True
     web_host: str = "127.0.0.1"
     web_port: int = 5000
     public_url: str = ""
+    # Список доверенных reverse proxy через запятую. Пусто — X-Forwarded-For
+    # игнорируется, клиентский IP берётся из реального подключения.
+    trusted_proxies: str = ""
 
     admin_username: str = "admin"
     admin_password: str = ""
@@ -92,6 +97,14 @@ class Settings(BaseSettings):
     @property
     def ip_allowlist(self) -> list[str]:
         return [item.strip() for item in self.ip_whitelist.split(",") if item.strip()]
+
+    @property
+    def trusted_proxy_list(self) -> list[str]:
+        return [item.strip() for item in self.trusted_proxies.split(",") if item.strip()]
+
+    @property
+    def proxy_headers_enabled(self) -> bool:
+        return bool(self.trusted_proxy_list)
 
     @property
     def admin_auth_configured(self) -> bool:

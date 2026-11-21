@@ -57,9 +57,9 @@
 
 {% if pages > 1 %}
 <div class="pager">
-  {% if page > 1 %}<a class="btn ghost" href="/trackings?active={{ active }}&q={{ q }}&page={{ page - 1 }}">← Назад</a>{% endif %}
+  {% if page > 1 %}<a class="btn ghost" href="/trackings?active={{ active }}&q={{ q|urlencode }}&page={{ page - 1 }}">← Назад</a>{% endif %}
   <span class="muted">стр. {{ page }} из {{ pages }}</span>
-  {% if page < pages %}<a class="btn ghost" href="/trackings?active={{ active }}&q={{ q }}&page={{ page + 1 }}">Вперёд →</a>{% endif %}
+  {% if page < pages %}<a class="btn ghost" href="/trackings?active={{ active }}&q={{ q|urlencode }}&page={{ page + 1 }}">Вперёд →</a>{% endif %}
 </div>
 {% endif %}
 {% endblock %}

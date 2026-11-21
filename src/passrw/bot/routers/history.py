@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+from datetime import timedelta
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -53,6 +55,7 @@ async def menu_history(call: CallbackQuery, database: Database) -> None:
 @router.callback_query(F.data.regexp(r"^hist:\d+$"))
 async def repeat_search(
     call: CallbackQuery,
+    state: FSMContext,
     database: Database,
     client: RwbyClient,
     settings: Settings,
@@ -68,9 +71,28 @@ async def repeat_search(
     if item.travel_date < today:
         await call.answer("Дата этого поиска уже прошла", show_alert=True)
         return
+    if item.travel_date > today + timedelta(days=settings.sale_window_days):
+        await call.answer(
+            f"Продажа открыта на {settings.sale_window_days} суток вперёд",
+            show_alert=True,
+        )
+        return
 
+    search_id = secrets.token_hex(4)
+    await state.clear()
+    await state.set_state(SearchFlow.results)
+    await state.update_data(
+        from_station=item.from_station,
+        to_station=item.to_station,
+        travel_date=item.travel_date.isoformat(),
+        passengers=item.passengers,
+        candidates=[],
+        pending=None,
+        trains=[],
+        search_id=search_id,
+    )
     await call.answer("🔎 Повторяю поиск…")
-    await perform_search(
+    trains = await perform_search(
         call.bot,
         database,
         client,
@@ -79,7 +101,9 @@ async def repeat_search(
         item.to_station,
         item.travel_date,
         item.passengers,
+        search_id,
     )
+    await state.update_data(trains=trains or [])
 
 
 async def _send_favorites(
@@ -136,12 +160,18 @@ async def favorite_open(
         candidates=[],
         pending=None,
         trains=[],
+        search_id=secrets.token_hex(4),
     )
     await call.answer()
     await call.message.answer(
         f"3️⃣ <b>Когда едем?</b>\n{escape(item.from_station)} → {escape(item.to_station)}\n"
         "Выберите дату:",
-        reply_markup=keyboards.calendar_kb(today.year, today.month, today),
+        reply_markup=keyboards.calendar_kb(
+            today.year,
+            today.month,
+            today,
+            max_date=today + timedelta(days=settings.sale_window_days),
+        ),
     )
 
 

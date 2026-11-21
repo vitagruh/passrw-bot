@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import secrets
+import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from passrw import __version__
@@ -36,11 +37,15 @@ from passrw.util.time import fmt_local
 from passrw.web.security import (
     LoginGuard,
     RateLimiter,
+    admin_credentials_fingerprint,
     csrf_valid,
     csv_safe,
     ensure_csrf,
+    safe_compare_str,
     verify_admin,
 )
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -51,6 +56,24 @@ PUBLIC_PATHS = {"/login", "/healthz", "/metrics"}
 TRACKING_PAGE_SIZE = 25
 USERS_PAGE_SIZE = 50
 LOGS_PAGE_SIZE = 100
+MAX_ROW_ID = 2**63
+MAX_PAGE = 100_000
+
+
+def _page_count(total: int, size: int) -> int:
+    return max(1, (total + size - 1) // size)
+
+
+def _parse_row_id(raw: str) -> int:
+    """Идентификатор записи: только положительный int в пределах SQLite."""
+    text = (raw or "").strip()
+    # isdigit() истинно и для не-ASCII цифр ('²'), а int() на них падает.
+    if not text.isascii() or not text.isdigit():
+        raise HTTPException(404, "Запись не найдена")
+    value = int(text)
+    if not 1 <= value < MAX_ROW_ID:
+        raise HTTPException(404, "Запись не найдена")
+    return value
 
 
 def create_web_app(
@@ -75,11 +98,18 @@ def create_web_app(
 
     login_guard = LoginGuard(settings.login_max_attempts, settings.login_lockout_seconds)
     login_rate = RateLimiter(settings.rate_limit_requests, settings.rate_limit_window)
+    credentials_fingerprint = admin_credentials_fingerprint(settings)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     def client_ip(request: Request) -> str:
+        # request.client.host — реальный адрес подключения; X-Forwarded-For
+        # учитывается только если uvicorn настроен доверять прокси (см. __main__).
         return request.client.host if request.client else "unknown"
+
+    async def admin_epoch() -> int:
+        async with database.session() as session:
+            return await repo.ensure_admin_session_epoch(session, credentials_fingerprint)
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
@@ -87,29 +117,45 @@ def create_web_app(
         ip = client_ip(request)
 
         if path != "/healthz" and settings.ip_allowlist and ip not in settings.ip_allowlist:
-            return PlainTextResponse("Forbidden: IP is not allowlisted", status_code=403)
+            return _security_headers(
+                PlainTextResponse("Forbidden: IP is not allowlisted", status_code=403),
+                settings,
+            )
 
         if path in PUBLIC_PATHS or path.startswith("/static/"):
             response = await call_next(request)
-            return _security_headers(response)
+            return _security_headers(
+                response, settings, no_store=not path.startswith("/static/")
+            )
 
         if not settings.admin_auth_configured:
-            return PlainTextResponse(
-                "Admin password is not configured (ADMIN_PASSWORD / ADMIN_PASSWORD_HASH)",
-                status_code=503,
+            return _security_headers(
+                PlainTextResponse(
+                    "Admin password is not configured (ADMIN_PASSWORD / ADMIN_PASSWORD_HASH)",
+                    status_code=503,
+                ),
+                settings,
             )
 
         if not request.session.get("admin"):
-            return RedirectResponse("/login", status_code=303)
+            return _security_headers(RedirectResponse("/login", status_code=303), settings)
+
+        if request.session.get("admin_epoch") != await admin_epoch():
+            request.session.clear()
+            return _security_headers(
+                RedirectResponse("/login?expired=1", status_code=303), settings
+            )
 
         last_activity = request.session.get("last_activity", 0)
         if last_activity and time.time() - last_activity > settings.session_timeout_minutes * 60:
             request.session.clear()
-            return RedirectResponse("/login?expired=1", status_code=303)
+            return _security_headers(
+                RedirectResponse("/login?expired=1", status_code=303), settings
+            )
         request.session["last_activity"] = time.time()
 
         response = await call_next(request)
-        return _security_headers(response)
+        return _security_headers(response, settings)
 
     # SessionMiddleware добавляется после auth_guard, чтобы оказаться снаружи:
     # auth_guard обращается к request.session.
@@ -122,11 +168,31 @@ def create_web_app(
         https_only=settings.session_cookie_secure,
     )
 
+    def pop_flash(request: Request) -> tuple[str, str]:
+        data = request.session.pop("_flash", None)
+        if isinstance(data, dict):
+            return str(data.get("message", "")), str(data.get("error", ""))
+        return "", ""
+
+    def set_flash(request: Request, *, message: str = "", error: str = "") -> None:
+        request.session["_flash"] = {"message": message, "error": error}
+
+    def redirect_with_flash(
+        request: Request, url: str, *, message: str = "", error: str = ""
+    ) -> RedirectResponse:
+        if message or error:
+            set_flash(request, message=message, error=error)
+        return RedirectResponse(url, status_code=303)
+
     def render(
         request: Request, name: str, *, status_code: int = 200, **context: Any
     ) -> HTMLResponse:
         context.setdefault("admin", request.session.get("admin", ""))
         context.setdefault("settings", settings)
+        if "message" not in context and "error" not in context:
+            message, error = pop_flash(request)
+            context["message"] = message
+            context["error"] = error
         return templates.TemplateResponse(request, name, context, status_code=status_code)
 
     async def log_admin(request: Request, action: str, details: str = "") -> None:
@@ -141,6 +207,50 @@ def create_web_app(
                 )
         except Exception:  # noqa: BLE001 — аудит не должен ломать действие
             pass
+
+    def wants_json(request: Request) -> bool:
+        return "application/json" in request.headers.get("accept", "").casefold()
+
+    def html_error(request: Request, status_code: int, message: str) -> Response:
+        if wants_json(request):
+            response: Response = JSONResponse(
+                {"status": status_code, "detail": message}, status_code=status_code
+            )
+        else:
+            admin = ""
+            try:
+                admin = request.session.get("admin", "")
+            except AssertionError:  # сессии нет — ошибка до SessionMiddleware
+                pass
+            response = templates.TemplateResponse(
+                request,
+                "error.html",
+                {
+                    "status": status_code,
+                    "message": message,
+                    "admin": admin,
+                    "settings": settings,
+                },
+                status_code=status_code,
+            )
+        return _security_headers(response, settings)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def on_http_exception(request: Request, exc: StarletteHTTPException):
+        detail = exc.detail if isinstance(exc.detail, str) else "Ошибка запроса"
+        return html_error(request, exc.status_code, detail)
+
+    @app.exception_handler(RequestValidationError)
+    async def on_validation_error(request: Request, exc: RequestValidationError):
+        return html_error(request, 422, "Некорректные параметры запроса")
+
+    @app.exception_handler(Exception)
+    async def on_unhandled_error(request: Request, exc: Exception):
+        logger.error(
+            "Необработанная ошибка админки: %s %s", request.method, request.url.path,
+            exc_info=exc,
+        )
+        return html_error(request, 500, "Внутренняя ошибка сервера")
 
     # ── вход ───────────────────────────────────────────────────
 
@@ -183,8 +293,10 @@ def create_web_app(
             return render(request, "login.html", error="Неверный логин или пароль", status_code=401)
 
         login_guard.reset(ip)
+        epoch = await admin_epoch()
         request.session.clear()
         request.session["admin"] = username
+        request.session["admin_epoch"] = epoch
         request.session["last_activity"] = time.time()
         ensure_csrf(request)
         await log_admin(request, "LOGIN", f"username={username[:64]}")
@@ -194,6 +306,8 @@ def create_web_app(
     async def logout(request: Request):
         admin = request.session.get("admin", "")
         request.session.clear()
+        async with database.session() as session:
+            await repo.bump_admin_session_epoch(session)
         await log_admin(request, "LOGOUT", f"username={admin}")
         return RedirectResponse("/login", status_code=303)
 
@@ -216,6 +330,7 @@ def create_web_app(
             errors=errors,
             stations=stations,
             running=manager.running_count,
+            mismatch=counts["active_trackings"] != manager.running_count,
             uptime=str(timedelta(seconds=manager.uptime_seconds)),
             nav="dashboard",
         )
@@ -229,7 +344,9 @@ def create_web_app(
         q: str = "",
         page: int = 1,
     ):
-        page = max(1, page)
+        # Ограничиваем page до расчёта offset: иначе ?page=10**19
+        # переполняет INTEGER SQLite ещё до clamp по числу страниц.
+        page = min(max(1, page), MAX_PAGE)
         active_filter: bool | None = {"1": True, "0": False, "all": None}.get(active, True)
         async with database.session() as session:
             rows, total = await repo.list_trackings(
@@ -239,66 +356,72 @@ def create_web_app(
                 offset=(page - 1) * TRACKING_PAGE_SIZE,
                 limit=TRACKING_PAGE_SIZE,
             )
+            pages = _page_count(total, TRACKING_PAGE_SIZE)
+            if page > pages:
+                page = pages
+                rows, total = await repo.list_trackings(
+                    session,
+                    active=active_filter,
+                    query=q.strip(),
+                    offset=(page - 1) * TRACKING_PAGE_SIZE,
+                    limit=TRACKING_PAGE_SIZE,
+                )
         return render(
             request,
             "trackings.html",
             rows=rows,
             total=total,
             page=page,
-            pages=max(1, (total + TRACKING_PAGE_SIZE - 1) // TRACKING_PAGE_SIZE),
+            pages=pages,
             active=active,
             q=q,
             nav="trackings",
-            message=request.query_params.get("msg", ""),
-            error=request.query_params.get("error", ""),
         )
 
     @app.get("/trackings/{tracking_id}", response_class=HTMLResponse)
-    async def tracking_detail(request: Request, tracking_id: int):
+    async def tracking_detail(request: Request, tracking_id: str):
+        row_id = _parse_row_id(tracking_id)
         async with database.session() as session:
-            tracking = await repo.get_tracking_with_user(session, tracking_id)
+            tracking = await repo.get_tracking_with_user(session, row_id)
             if tracking is None:
                 raise HTTPException(404, "Трекинг не найден")
-            samples = await repo.list_samples(session, tracking_id, 100)
+            samples = await repo.list_samples(session, row_id, 100)
         return render(
             request,
             "tracking.html",
             t=tracking,
             samples=samples,
-            running=manager.is_running(tracking_id),
+            running=manager.is_running(row_id),
             carriage_filters=CARRIAGE_FILTERS,
             nav="trackings",
-            message=request.query_params.get("msg", ""),
-            error=request.query_params.get("error", ""),
         )
 
     @app.post("/trackings/{tracking_id}/stop")
     async def tracking_stop(
         request: Request,
-        tracking_id: int,
+        tracking_id: str,
         notify: str | None = Form(None),
     ):
+        row_id = _parse_row_id(tracking_id)
         async with database.session() as session:
-            tracking = await repo.get_tracking(session, tracking_id)
+            tracking = await repo.get_tracking(session, row_id)
             if tracking is None:
                 raise HTTPException(404, "Трекинг не найден")
             route = f"{tracking.from_station} → {tracking.to_station}"
         stopped = await manager.stop(
-            tracking_id,
+            row_id,
             reason="admin_stop",
             notify_user=notify is not None,
             message=f"⏹ Трекинг {route} остановлен администратором.",
         )
-        await log_admin(request, "TRACKING_STOP", f"id={tracking_id} {route}")
+        await log_admin(request, "TRACKING_STOP", f"id={row_id} {route}")
         suffix = "остановлен" if stopped else "уже неактивен"
-        return RedirectResponse(
-            f"/trackings/{tracking_id}?msg={quote_plus(suffix)}", status_code=303
-        )
+        return redirect_with_flash(request, f"/trackings/{row_id}", message=suffix)
 
     @app.post("/trackings/{tracking_id}/filters")
     async def tracking_filters(
         request: Request,
-        tracking_id: int,
+        tracking_id: str,
         notify_threshold: str = Form(""),
         carriage_filter: str = Form("any"),
         max_price: str = Form(""),
@@ -306,6 +429,7 @@ def create_web_app(
         heartbeat_interval: str = Form("1800"),
         stop_on_success: str | None = Form(None),
     ):
+        row_id = _parse_row_id(tracking_id)
         fields: dict[str, Any] = {}
         try:
             threshold_raw = notify_threshold.strip()
@@ -321,50 +445,52 @@ def create_web_app(
             if fields["max_price"] is not None and not 0 < fields["max_price"] <= 100000:
                 raise ValueError("цена вне диапазона")
 
-            fields["heartbeat_interval"] = max(300, int(heartbeat_interval or 1800))
+            fields["heartbeat_interval"] = min(
+                max(300, int(heartbeat_interval or 1800)), 604800
+            )
         except ValueError as exc:
-            return RedirectResponse(
-                f"/trackings/{tracking_id}?error={quote_plus(str(exc))}", status_code=303
+            return redirect_with_flash(
+                request, f"/trackings/{row_id}", error=str(exc)
             )
 
         fields["heartbeat_enabled"] = heartbeat_enabled is not None
         fields["stop_on_success"] = stop_on_success is not None
 
         async with database.session() as session:
-            tracking = await repo.get_tracking(session, tracking_id)
+            tracking = await repo.get_tracking(session, row_id)
             if tracking is None:
                 raise HTTPException(404, "Трекинг не найден")
             is_active = tracking.is_active
-            await repo.update_tracking(session, tracking_id, **fields)
+            await repo.update_tracking(session, row_id, **fields)
         if is_active:
-            manager.add(tracking_id)
-        await log_admin(request, "TRACKING_FILTERS", f"id={tracking_id} {fields}")
-        return RedirectResponse(
-            f"/trackings/{tracking_id}?msg={quote_plus('Фильтры сохранены')}", status_code=303
+            manager.add(row_id)
+        await log_admin(request, "TRACKING_FILTERS", f"id={row_id} {fields}")
+        return redirect_with_flash(
+            request, f"/trackings/{row_id}", message="Фильтры сохранены"
         )
 
     @app.post("/trackings/{tracking_id}/delete")
-    async def tracking_delete(request: Request, tracking_id: int):
+    async def tracking_delete(request: Request, tracking_id: str):
+        row_id = _parse_row_id(tracking_id)
         async with database.session() as session:
-            tracking = await repo.get_tracking(session, tracking_id)
+            tracking = await repo.get_tracking(session, row_id)
             if tracking is None:
                 raise HTTPException(404, "Трекинг не найден")
             if tracking.is_active:
-                return RedirectResponse(
-                    f"/trackings/{tracking_id}?error={quote_plus('Сначала остановите трекинг')}",
-                    status_code=303,
+                return redirect_with_flash(
+                    request,
+                    f"/trackings/{row_id}",
+                    error="Сначала остановите трекинг",
                 )
-            await repo.delete_tracking(session, tracking_id)
-        await log_admin(request, "TRACKING_DELETE", f"id={tracking_id}")
-        return RedirectResponse(
-            f"/trackings?msg={quote_plus('Трекинг удалён')}", status_code=303
-        )
+            await repo.delete_tracking(session, row_id)
+        await log_admin(request, "TRACKING_DELETE", f"id={row_id}")
+        return redirect_with_flash(request, "/trackings", message="Трекинг удалён")
 
     # ── пользователи ───────────────────────────────────────────
 
     @app.get("/users", response_class=HTMLResponse)
     async def users_page(request: Request, q: str = "", page: int = 1):
-        page = max(1, page)
+        page = min(max(1, page), MAX_PAGE)
         async with database.session() as session:
             rows, total = await repo.list_users(
                 session,
@@ -372,58 +498,67 @@ def create_web_app(
                 limit=USERS_PAGE_SIZE,
                 query=q.strip(),
             )
+            pages = _page_count(total, USERS_PAGE_SIZE)
+            if page > pages:
+                page = pages
+                rows, total = await repo.list_users(
+                    session,
+                    offset=(page - 1) * USERS_PAGE_SIZE,
+                    limit=USERS_PAGE_SIZE,
+                    query=q.strip(),
+                )
         return render(
             request,
             "users.html",
             rows=[{"user": user, "active": active} for user, active in rows],
             total=total,
             page=page,
-            pages=max(1, (total + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE),
+            pages=pages,
             q=q,
             nav="users",
-            message=request.query_params.get("msg", ""),
-            error=request.query_params.get("error", ""),
         )
 
     @app.post("/users/{chat_id}/block")
-    async def user_block(request: Request, chat_id: int):
+    async def user_block(request: Request, chat_id: str):
+        row_id = _parse_row_id(chat_id)
         async with database.session() as session:
-            user = await repo.get_user(session, chat_id)
+            user = await repo.get_user(session, row_id)
             if user is None:
                 raise HTTPException(404, "Пользователь не найден")
             target = not user.is_blocked
-            await repo.set_user_blocked(session, chat_id, target)
+            await repo.set_user_blocked(session, row_id, target)
         if target:
-            await manager.stop_all_for_chat(chat_id, reason="admin_block")
+            await manager.stop_all_for_chat(row_id, reason="admin_block")
         action = "USER_BLOCK" if target else "USER_UNBLOCK"
-        await log_admin(request, action, f"chat_id={chat_id}")
-        return RedirectResponse(
-            f"/users?msg={quote_plus('Пользователь заблокирован' if target else 'Блокировка снята')}",
-            status_code=303,
+        await log_admin(request, action, f"chat_id={row_id}")
+        return redirect_with_flash(
+            request,
+            "/users",
+            message="Пользователь заблокирован" if target else "Блокировка снята",
         )
 
     @app.post("/users/{chat_id}/role")
-    async def user_role(request: Request, chat_id: int, role: str = Form("user")):
+    async def user_role(request: Request, chat_id: str, role: str = Form("user")):
+        row_id = _parse_row_id(chat_id)
         if role not in {"user", "moderator", "admin"}:
             raise HTTPException(400, "Неизвестная роль")
         async with database.session() as session:
-            await repo.set_user_role(session, chat_id, role)
-        await log_admin(request, "USER_ROLE", f"chat_id={chat_id} role={role}")
-        return RedirectResponse(
-            f"/users?msg={quote_plus('Роль обновлена')}", status_code=303
-        )
+            user = await repo.get_user(session, row_id)
+            if user is None:
+                raise HTTPException(404, "Пользователь не найден")
+            await repo.set_user_role(session, row_id, role)
+        await log_admin(request, "USER_ROLE", f"chat_id={row_id} role={role}")
+        return redirect_with_flash(request, "/users", message="Роль обновлена")
 
     @app.post("/broadcast")
     async def broadcast(request: Request, text: str = Form("")):
         body = text.strip()
         if not body or len(body) > 3500:
-            return RedirectResponse(
-                f"/users?error={quote_plus('Текст должен быть от 1 до 3500 символов')}",
-                status_code=303,
+            return redirect_with_flash(
+                request, "/users", error="Текст должен быть от 1 до 3500 символов"
             )
         async with database.session() as session:
             chat_ids = await repo.list_chat_ids(session)
-        sent = 0
         semaphore = asyncio.Semaphore(5)
 
         async def deliver(chat_id: int) -> bool:
@@ -433,9 +568,8 @@ def create_web_app(
         results = await asyncio.gather(*(deliver(chat_id) for chat_id in chat_ids))
         sent = sum(1 for ok in results if ok)
         await log_admin(request, "BROADCAST", f"sent={sent}/{len(chat_ids)}")
-        return RedirectResponse(
-            f"/users?msg={quote_plus(f'Рассылка: доставлено {sent} из {len(chat_ids)}')}",
-            status_code=303,
+        return redirect_with_flash(
+            request, "/users", message=f"Рассылка: доставлено {sent} из {len(chat_ids)}"
         )
 
     # ── логи ───────────────────────────────────────────────────
@@ -443,14 +577,23 @@ def create_web_app(
     @app.get("/logs", response_class=HTMLResponse)
     async def logs_page(request: Request, kind: str = "errors", page: int = 1):
         page = max(1, page)
-        offset = (page - 1) * LOGS_PAGE_SIZE
+        if kind not in {"errors", "users", "admin"}:
+            kind = "errors"
         async with database.session() as session:
+            if kind == "users":
+                total = await repo.count_user_logs(session)
+            elif kind == "admin":
+                total = await repo.count_admin_logs(session)
+            else:
+                total = await repo.count_bot_errors(session)
+            pages = _page_count(total, LOGS_PAGE_SIZE)
+            page = min(page, pages)
+            offset = (page - 1) * LOGS_PAGE_SIZE
             if kind == "users":
                 items = await repo.list_user_logs(session, LOGS_PAGE_SIZE, offset)
             elif kind == "admin":
                 items = await repo.list_admin_logs(session, LOGS_PAGE_SIZE, offset)
             else:
-                kind = "errors"
                 items = await repo.list_bot_errors(session, LOGS_PAGE_SIZE, offset)
         return render(
             request,
@@ -458,7 +601,8 @@ def create_web_app(
             items=items,
             kind=kind,
             page=page,
-            has_next=len(items) == LOGS_PAGE_SIZE,
+            pages=pages,
+            has_next=page < pages,
             nav="logs",
         )
 
@@ -514,23 +658,38 @@ def create_web_app(
         try:
             async with database.session() as session:
                 await session.execute(text("SELECT 1"))
+                active = await repo.count_active_trackings(session)
+                last_check = await repo.last_check_time(session)
         except Exception:  # noqa: BLE001
             return JSONResponse({"status": "error", "database": "unavailable"}, status_code=503)
-        return {"status": "ok", "version": __version__, "database": "ok"}
+        running = manager.running_count
+        return {
+            "status": "ok" if running >= active else "degraded",
+            "database": "ok",
+            "manager": {
+                "running": running,
+                "active_trackings": active,
+                "last_check_at": last_check.isoformat(sep=" ", timespec="seconds")
+                if last_check
+                else None,
+            },
+        }
 
     @app.get("/metrics")
     async def metrics(request: Request):
         if settings.metrics_token:
             header = request.headers.get("authorization", "")
             expected = f"Bearer {settings.metrics_token}"
-            if not secrets.compare_digest(header, expected):
+            if not safe_compare_str(header, expected):
                 raise HTTPException(403, "Metrics token required")
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
 
 
-def _security_headers(response: Response) -> Response:
+def _security_headers(
+    response: Response, settings: Settings | None = None, *, no_store: bool = True
+) -> Response:
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -539,6 +698,11 @@ def _security_headers(response: Response) -> Response:
         "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "script-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     )
+    if no_store:
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("Pragma", "no-cache")
+    if settings is not None and settings.session_cookie_secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     return response
 
 

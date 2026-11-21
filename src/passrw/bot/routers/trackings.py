@@ -99,7 +99,7 @@ async def tracking_trend(
         trend_text(tracking, samples, settings.timezone),
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"mt:trend:{tracking_id}")]
+                [InlineKeyboardButton(text="🔁 Перечитать замеры", callback_data=f"mt:trend:{tracking_id}")]
             ]
         ),
     )
@@ -161,7 +161,8 @@ async def tracking_stop(
         notify_user=True,
         message=(
             f"⏹ Трекинг {tracking.from_station} → {tracking.to_station} "
-            f"({tracking.travel_date.strftime('%d.%m.%Y')}) остановлен."
+            f"({tracking.travel_date.strftime('%d.%m.%Y')}) остановлен. "
+            "Запись и история замеров сохраняются до истечения срока хранения."
         ),
     )
     await call.answer("⏹ Остановлен")

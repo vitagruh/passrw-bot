@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from enum import StrEnum
 
 from bs4 import BeautifulSoup
 
@@ -16,20 +18,46 @@ from passrw.domain.railway import Carriage, Train
 _DIGITS = re.compile(r"\d+")
 _PRICE = re.compile(r"(\d+(?:[.,]\d+)?)")
 
-_EMPTY_MARKERS = (
-    "sch-table",
-    "ничего не найдено",
-    "нет поездов",
-    "не найдено",
-    "по вашему запросу",
-    "нет прямого сообщения",
-    "станция не найдена",
-    "в пределах 60 суток",
-)
+_STATION_NOT_FOUND_RE = re.compile(r"станц\w*[^\n<>]{0,40}не\s+найден")
+_SALE_WINDOW_RE = re.compile(r"в пределах \d+ суток|вне периода продажи|продажа.*не открыта")
+
+
+class EmptyReason(StrEnum):
+    """Почему на странице нет поездов."""
+
+    STATION_NOT_FOUND = "station_not_found"
+    NO_DIRECT_CONNECTION = "no_direct_connection"
+    OUT_OF_SALE_WINDOW = "out_of_sale_window"
+    NO_TRAINS = "no_trains"
+
+
+@dataclass(frozen=True)
+class RouteResult:
+    trains: list[Train]
+    reason: EmptyReason | None = None
 
 
 class LayoutChanged(Exception):
     """Страница получена, но таблица результатов не распознана."""
+
+
+def detect_empty_reason(html: str) -> EmptyReason | None:
+    """Распознаёт причину пустой выдачи по маркерам страницы."""
+    lowered = (html or "").casefold()
+    if _STATION_NOT_FOUND_RE.search(lowered):
+        return EmptyReason.STATION_NOT_FOUND
+    if "нет прямого сообщения" in lowered:
+        return EmptyReason.NO_DIRECT_CONNECTION
+    if _SALE_WINDOW_RE.search(lowered):
+        return EmptyReason.OUT_OF_SALE_WINDOW
+    if any(
+        marker in lowered
+        for marker in ("ничего не найдено", "нет поездов", "нет рейсов", "не найдено", "по вашему запросу")
+    ):
+        return EmptyReason.NO_TRAINS
+    if "sch-table" in lowered:
+        return EmptyReason.NO_TRAINS
+    return None
 
 
 def parse_route_html(html: str) -> list[Train]:
@@ -62,8 +90,8 @@ def parse_route_html(html: str) -> list[Train]:
 
 
 def looks_like_results_page(html: str) -> bool:
-    lowered = (html or "").casefold()
-    return any(marker in lowered for marker in _EMPTY_MARKERS)
+    """Страница похожа на выдачу (пустую или с таблицей), а не на сбой."""
+    return detect_empty_reason(html) is not None
 
 
 def _parse_carriages(row) -> list[Carriage]:

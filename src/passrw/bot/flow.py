@@ -13,13 +13,35 @@ from passrw.db import Database, repo
 from passrw.db.models import AvailabilitySample, Tracking
 from passrw.domain.railway import Train
 from passrw.services.notifications import build_train_card
-from passrw.services.parser import LayoutChanged
+from passrw.services.parser import EmptyReason, LayoutChanged
 from passrw.services.rwby import RwbyClient, SiteUnavailable
 from passrw.util.time import fmt_local
 
 logger = logging.getLogger(__name__)
 
 SPARK = "▁▂▃▄▅▆▇█"
+
+
+def _empty_message(
+    reason: EmptyReason | None, from_station: str, to_station: str, travel_date: date
+) -> str:
+    route = f"{escape(from_station)} → {escape(to_station)}"
+    if reason == EmptyReason.STATION_NOT_FOUND:
+        return "❌ Станция не найдена. Проверьте название и начните поиск заново: /track"
+    if reason == EmptyReason.NO_DIRECT_CONNECTION:
+        return (
+            f"🚫 Между {route} нет прямого сообщения. "
+            "Бот следит только за прямыми поездами."
+        )
+    if reason == EmptyReason.OUT_OF_SALE_WINDOW:
+        return (
+            f"🗓 Продажа билетов на {travel_date.strftime('%d.%m.%Y')} ещё не открыта. "
+            "Выберите более близкую дату."
+        )
+    return (
+        f"🚫 На {travel_date.strftime('%d.%m.%Y')} поездов {route} не найдено.\n"
+        "Проверьте дату или попробуйте другой маршрут."
+    )
 
 
 async def perform_search(
@@ -31,6 +53,7 @@ async def perform_search(
     to_station: str,
     travel_date: date,
     passengers: int,
+    search_id: str,
 ) -> list[Train] | None:
     """Выполняет поиск, пишет историю и отправляет список поездов."""
     async with database.session() as session:
@@ -52,12 +75,12 @@ async def perform_search(
         )
 
     try:
-        trains = await client.search(from_station, to_station, travel_date)
+        result = await client.search(from_station, to_station, travel_date)
     except LayoutChanged:
         await bot.send_message(
             chat_id,
             "⚠️ Сайт ответил, но расписание не удалось разобрать. "
-            "Похоже, pass.rw.by изменил вёрстку — я уже сообщил администратору.",
+            "Похоже, pass.rw.by изменил вёрстку — проверьте парсер.",
         )
         return None
     except SiteUnavailable as exc:
@@ -73,12 +96,10 @@ async def perform_search(
         await bot.send_message(chat_id, "❌ Не удалось выполнить поиск. Попробуйте ещё раз.")
         return None
 
+    trains = result.trains
     if not trains:
         await bot.send_message(
-            chat_id,
-            f"🚫 На {travel_date.strftime('%d.%m.%Y')} поездов "
-            f"{escape(from_station)} → {escape(to_station)} не найдено.\n"
-            "Проверьте дату или попробуйте другой маршрут.",
+            chat_id, _empty_message(result.reason, from_station, to_station, travel_date)
         )
         return []
 
@@ -90,7 +111,9 @@ async def perform_search(
     from passrw.bot.keyboards import trains_kb
 
     try:
-        await bot.send_message(chat_id, header, reply_markup=trains_kb(trains))
+        await bot.send_message(
+            chat_id, header, reply_markup=trains_kb(trains, search_id)
+        )
     except TelegramAPIError as exc:
         logger.warning("Не удалось отправить список поездов %s: %s", chat_id, exc)
     return trains
@@ -101,6 +124,7 @@ async def send_train_card(
     chat_id: int,
     *,
     train: Train,
+    search_id: str,
     index: int,
     passengers: int,
     from_station: str,
@@ -113,6 +137,7 @@ async def send_train_card(
 
     text = build_train_card(train=train, passengers=passengers)
     keyboard = train_actions_kb(
+        search_id,
         index,
         buy_url=_Client.buy_url(from_station, to_station, travel_date),
         favorite=favorite,
@@ -175,13 +200,13 @@ def stats_text(stats, active: int, favorites: int) -> str:
     searches = stats.total_searches if stats else 0
     created = stats.trackings_created if stats else 0
     notifications = stats.notifications_sent if stats else 0
-    conversion = (notifications / searches * 100) if searches else 0.0
+    per_search = (notifications / searches) if searches else 0.0
     return (
         "📊 <b>Ваша статистика</b>\n\n"
         f"🔍 Поисков: <b>{searches}</b>\n"
         f"🔔 Создано трекингов: <b>{created}</b>\n"
         f"🎯 Уведомлений о местах: <b>{notifications}</b>\n"
-        f"📈 Доля поисков с находкой: <b>{conversion:.0f}%</b>\n"
+        f"📈 Уведомлений на поиск: <b>{per_search:.2f}</b>\n"
         f"▶️ Активных трекингов: <b>{active}</b>\n"
         f"⭐ Избранных маршрутов: <b>{favorites}</b>"
     )

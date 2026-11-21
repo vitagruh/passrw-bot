@@ -47,7 +47,10 @@ def csrf_from(html: str) -> str:
 async def test_healthz_and_metrics_are_public(client):
     health = await client.get("/healthz")
     assert health.status_code == 200
-    assert health.json()["database"] == "ok"
+    body = health.json()
+    assert body["database"] == "ok"
+    assert "manager" in body
+    assert "version" not in body
 
     metrics = await client.get("/metrics")
     assert metrics.status_code == 200

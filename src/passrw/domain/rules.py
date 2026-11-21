@@ -53,20 +53,6 @@ def validate_station(value: str) -> bool:
     return 2 <= len(text) <= 64 and bool(STATION_RE.match(text))
 
 
-def parse_travel_date(value: str, today: date | None = None) -> date | None:
-    text = (value or "").strip()
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", text):
-        return None
-    try:
-        parsed = date.fromisoformat(text)
-    except ValueError:
-        return None
-    today = today or date.today()
-    if parsed < today or parsed > today + timedelta(days=365):
-        return None
-    return parsed
-
-
 def parse_quiet_hours(value: str) -> tuple[str | None, str | None] | None:
     """'22:00-08:00' -> пара; 'off' -> (None, None); неверный формат -> None."""
     cleaned = (value or "").strip().lower()

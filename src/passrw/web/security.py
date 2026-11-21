@@ -17,6 +17,22 @@ from passrw.config import Settings
 _ph = PasswordHasher()
 
 
+def safe_compare_str(first: str | None, second: str | None) -> bool:
+    """Сравнение строк без утечки по времени и без TypeError на non-ASCII."""
+    if not isinstance(first, str) or not isinstance(second, str):
+        return False
+    try:
+        return secrets.compare_digest(first.encode("utf-8"), second.encode("utf-8"))
+    except (TypeError, ValueError):
+        return False
+
+
+def admin_credentials_fingerprint(settings: Settings) -> str:
+    """Отпечаток учётных данных: смена пароля/хеша отзывает сессии админа."""
+    raw = settings.admin_password_hash or settings.admin_password
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def verify_password_hash(encoded: str, password: str) -> bool:
     """Проверяет argon2, а также pbkdf2/scrypt-хеши из старой админки."""
     try:
@@ -43,7 +59,7 @@ def verify_password_hash(encoded: str, password: str) -> bool:
 
 
 def verify_admin(settings: Settings, username: str, password: str) -> bool:
-    if not password or not secrets.compare_digest(username, settings.admin_username):
+    if not password or not safe_compare_str(username, settings.admin_username):
         return False
     if settings.admin_password_hash:
         return verify_password_hash(settings.admin_password_hash, password)
@@ -62,7 +78,7 @@ def ensure_csrf(request) -> str:
 
 def csrf_valid(request, supplied: str | None) -> bool:
     expected = request.session.get("_csrf")
-    return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+    return bool(expected) and safe_compare_str(expected, supplied)
 
 
 class RateLimiter:

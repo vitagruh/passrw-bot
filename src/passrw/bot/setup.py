@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ErrorEvent
 
 from passrw.bot.middlewares import ThrottleMiddleware, UserMiddleware
-from passrw.bot.routers import common, history, search, trackings
+from passrw.bot.routers import commands, common, history, search, trackings
 from passrw.bot.routers import settings as settings_router
 from passrw.config import Settings
 from passrw.db import Database, repo
@@ -36,8 +36,10 @@ def create_dispatcher(
         observer.middleware(UserMiddleware(database))
         observer.middleware(ThrottleMiddleware())
 
+    # commands — первым: слэш-команды не должны перехватываться шагами поиска.
     # common подключается последним: его fallback ловит всё, что не обработано выше.
     dp.include_routers(
+        commands.router,
         search.router,
         trackings.router,
         settings_router.router,

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from passrw.services.parser import looks_like_results_page, parse_route_html
+import pytest
+
+from passrw.services.parser import (
+    EmptyReason,
+    detect_empty_reason,
+    looks_like_results_page,
+    parse_route_html,
+)
 
 SAMPLE_HTML = """
 <html><body>
@@ -129,3 +136,22 @@ def test_layout_markers_detected():
     assert looks_like_results_page("Станция не найдена")
     assert looks_like_results_page("Выберите дату в пределах 60 суток")
     assert not looks_like_results_page("<html><body><h1>502 Bad Gateway</h1></body></html>")
+
+
+@pytest.mark.parametrize(
+    ("html", "reason"),
+    [
+        ("<p>Станция отправления не найдена</p>", EmptyReason.STATION_NOT_FOUND),
+        ("<p>Нет прямого сообщения между станциями</p>", EmptyReason.NO_DIRECT_CONNECTION),
+        ("<p>Выберите дату в пределах 60 суток</p>", EmptyReason.OUT_OF_SALE_WINDOW),
+        ("<p>Продажа билетов не открыта</p>", EmptyReason.OUT_OF_SALE_WINDOW),
+        ("<p>По вашему запросу ничего не найдено</p>", EmptyReason.NO_TRAINS),
+        ("<div class='sch-table'></div>", EmptyReason.NO_TRAINS),
+    ],
+)
+def test_detect_empty_reason_markers(html, reason):
+    assert detect_empty_reason(html) is reason
+
+
+def test_unknown_page_has_no_empty_reason():
+    assert detect_empty_reason("<html><body><h1>502 Bad Gateway</h1></body></html>") is None

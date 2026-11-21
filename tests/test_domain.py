@@ -11,7 +11,6 @@ from passrw.domain.rules import (
     adaptive_interval,
     in_quiet_hours,
     parse_quiet_hours,
-    parse_travel_date,
     seconds_until_quiet_end,
     validate_station,
 )
@@ -33,14 +32,6 @@ def test_validate_station_accepts_normal_names(value):
 @pytest.mark.parametrize("value", ["", "A", "Минск!", "<script>", "   "])
 def test_validate_station_rejects_bad_names(value):
     assert not validate_station(value)
-
-
-def test_parse_travel_date_limits():
-    assert parse_travel_date("2026-11-09", TODAY) == TODAY
-    assert parse_travel_date("2026-11-10", TODAY) == TODAY + timedelta(days=1)
-    assert parse_travel_date("2026-11-08", TODAY) is None
-    assert parse_travel_date("2027-11-10", TODAY) is None
-    assert parse_travel_date("09.11.2026", TODAY) is None
 
 
 # ── тихие часы ─────────────────────────────────────────────────

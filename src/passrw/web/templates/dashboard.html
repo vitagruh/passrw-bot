@@ -6,12 +6,20 @@
   <span class="muted">uptime {{ uptime }} · активных задач: {{ running }}</span>
 </div>
 
+{% if mismatch %}
+<div class="flash error">
+  Задач в менеджере: {{ running }}, активных трекингов в БД: {{ counts.active_trackings }}.
+  Расхождение может означать, что часть проверок не запущена.
+</div>
+{% endif %}
+
 <section class="cards">
   <div class="card"><span class="label">Пользователи</span><strong>{{ counts.users }}</strong></div>
   <div class="card"><span class="label">Активные трекинги</span><strong class="ok">{{ counts.active_trackings }}</strong></div>
   <div class="card"><span class="label">Уведомления (всего)</span><strong>{{ counts.notifications }}</strong></div>
   <div class="card"><span class="label">Находки за 24 ч</span><strong class="ok">{{ counts.success_24h }}</strong></div>
   <div class="card"><span class="label">Ошибки за 24 ч</span><strong class="{{ 'danger' if counts.errors_24h else '' }}">{{ counts.errors_24h }}</strong></div>
+  <div class="card"><span class="label">Последняя успешная проверка</span><strong>{{ counts.last_success_at|localdt if counts.last_success_at else '—' }}</strong></div>
   <div class="card"><span class="label">Остановлено трекингов</span><strong>{{ counts.stopped_trackings }}</strong></div>
 </section>
 

@@ -200,3 +200,12 @@ class AdminLog(Base):
     details: Mapped[str | None] = mapped_column(Text)
     ip_address: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AppMeta(Base):
+    """Служебные пары ключ/значение (эпоха сессий администратора и т.п.)."""
+
+    __tablename__ = "app_meta"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
